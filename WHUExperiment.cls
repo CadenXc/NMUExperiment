@@ -45,7 +45,12 @@
  \else
 \hypersetup{citecolor=magenta,linkcolor=blue}
 \fi
-\RequirePackage[top=2.5truecm,bottom=2truecm,left=3truecm,right=3truecm,includefoot,xetex]{geometry}    % 页面设置%
+\RequirePackage[top=30mm,bottom=25mm,left=30mm,right=20mm,includefoot,xetex]{geometry}    % 页面设置%
+\RequirePackage{zhnumber}
+
+\setlength{\parskip}{0pt} % 全局取消段前段后间距
+\setlength{\parsep}{0pt}
+
 
 \newtoks\StudentNumber       %学号
 \newtoks\miji            %密级
@@ -67,57 +72,53 @@
 
 \pagestyle{fancyplain}
 \fancyhf{}  %清除以前对页眉页脚的设置
-\renewcommand{\headrulewidth}{0pt}
-\fancyfoot[C]{-\,\thepage\,-}
+\renewcommand{\headrulewidth}{0.5pt}
+\fancyhead[C]{\zihao{5}\songti 北方民族大学本科毕业论文（设计）}
+\fancyfoot[C]{\zihao{5}\songti \thepage}
 
 
 \fancypagestyle{plain}
 {
-\fancyhead{}                                    % clear all header fields
-\renewcommand{\headrulewidth}{0pt}
-\fancyfoot{}                                    % clear all footer fields
-\fancyfoot[C]{\zihao{5}\usefonttimes{-\,\thepage\,-}}
+\fancyhf{}
+\fancyhead[C]{\zihao{5}\songti 北方民族大学本科毕业论文（设计）}
+\renewcommand{\headrulewidth}{0.5pt}
+\fancyfoot[C]{\zihao{5}\songti \thepage}
 }
 
 %%=====封面===================== 
 \def\maketitle{%
   \null
   \thispagestyle{empty}%
-  %\vspace*{-2cm}
   \begin{center}\leavevmode
     {\heiti \zihao{5}%
     \begin{tabular}{p{9cm}lp{3cm}l}
-%  & \raisebox{-0.5ex}[0pt]{\makebox[1.5cm][s]{学\hfill 号}} & {}\hfill\raisebox{-0.5ex}[0pt]{\the\StudentNumber}\hfill{} & \\ \cline{3-3}
-%  & \raisebox{-0.5ex}[0pt]{\makebox[1.5cm][s]{密\hfill 级}} & {}\hfill\raisebox{-0.5ex}[0pt]{\the\miji}\hfill{}   & \\ \cline{3-3}
     \end{tabular}
     }
     \par
-    \vspace*{0.9cm} %插入空白
-    {\songti \zihao{1} \makebox[9cm][s]{武汉大学计算机学院}}\\
+    \begin{figure}
+      \centering
+      \includegraphics[width=35mm]{figures/cover/xiaobiao.png}
+    \end{figure}
+    {\songti \zihao{1} \makebox[13cm][s]{北方民族大学}}\\
 	\vspace{0.8cm}
-	{\songti \zihao{1} \makebox[9cm][s]{本科生课程实验报告}}\\
-    \vspace{2.0cm}
-    {\heiti \zihao{2} \@title \par}%
+	{\songti \zihao{1} \makebox[10cm][s]{本科毕业论文（设计）}}\\
+    \vspace{1.0cm}
+    {\heiti \zihao{2} 题目：\underline{\@title} \par}%
 %    \vspace{4.2cm}
-     \vfill\vfill\vfill
     {\songti\zihao{-3}
-    \begin{tabular}{cp{3cm}c}
-      \raisebox{-3ex}[0pt]{\makebox[3.5cm][s]{专\hfill 业\hfill 名\hfill 称\hfill:\hfill}} & { {}\raisebox{-3ex}[0pt]{\the\Cmajor}\hfill{}} & \\[3ex]
-      \raisebox{-3ex}[0pt]{\makebox[3.5cm][s]{课\hfill 程\hfill 名\hfill 称\hfill:\hfill}} & {  {}\raisebox{-3ex}[0pt]{\the\Ccoursename}\hfill{}} & \\[3ex]
-	  \raisebox{-3ex}[0pt]{\makebox[3.5cm][s]{指\hfill 导\hfill 教\hfill 师\hfill:\hfill}} & { {}\raisebox{-3ex}[0pt]{\the\Csupervisor}\hfill{}} & \\[3ex]
-
-      % 关闭第二指导教师显示
-      % \raisebox{-3ex}[0pt]{\makebox[3.5cm][s]{指\hfill 导\hfill 教\hfill 师\hfill:\hfill}} & { {}\raisebox{-3ex}[0pt]{\the\CsupervisorAnother}\hfill{}} & \\[3ex]
-	  \raisebox{-3ex}[0pt]{\makebox[3.5cm][s]{学\hfill 生\hfill 学\hfill 号\hfill:\hfill}} & { {}\raisebox{-3ex}[0pt]{\the\CstudentNum}\hfill{}} & \\[3ex]
-	  \raisebox{-3ex}[0pt]{\makebox[3.5cm][s]{学\hfill 生\hfill 姓\hfill 名\hfill:\hfill}} & { {}\raisebox{-3ex}[0pt]{\@author}\hfill{}} & \\[3ex]
+    \begin{tabular}{l l}
+      \makebox[3.5cm][s]{学\hfill 院\hfill 名\hfill 称\hfill:\hfill} & \underline{\makebox[8cm][c]{\the\Ccoursename}} \\[1.5ex]
+      \makebox[3.5cm][s]{专\hfill 业\hfill :\hfill} & \underline{\makebox[8cm][c]{\the\Cmajor}} \\[1.5ex]
+	  \makebox[3.5cm][s]{学\hfill 生\hfill 姓\hfill 名\hfill:\hfill} & \underline{\makebox[8cm][c]{\@author}} \\[1.5ex]
+	  \makebox[3.5cm][s]{学\hfill 号\hfill :\hfill} & \underline{\makebox[8cm][c]{\the\CstudentNum}} \\[1.5ex]
+	  \makebox[3.5cm][s]{指\hfill 导\hfill 教\hfill 师\hfill 姓\hfill 名\hfill:\hfill} & \underline{\makebox[8cm][c]{\the\Csupervisor}} \\[1.5ex]
+      \makebox[3.5cm][s]{企\hfill 业\hfill 指\hfill 导\hfill 教\hfill 师\hfill:\hfill} & \underline{\makebox[8cm][c]{\the\CsupervisorAnother}} \\[1.5ex]
+      \makebox[3.5cm][s]{论\hfill 文\hfill 提\hfill 交\hfill 时\hfill 间\hfill:\hfill} & \underline{\makebox[8cm][c]{\@date}} \\[1.5ex]
      \end{tabular}
     }
     \par
-    \vspace{2.6cm}
-    {
-    {\songti \zihao{3} \@date \par}%
-    }
-    %\vspace*{-0.7cm}
+    \vfill
+    {\heiti\zihao{4} 北方民族大学教务处制 \par}
   \end{center}%
 %  \null
 %   \cleardoublepage
@@ -128,22 +129,33 @@
 \newcommand\cnabstractname{摘要}
 \newcommand\teachername{教师评语评分}
 \newcommand\enabstractname{ABSTRACT}
-\newcommand\cnkeywords[1]{ {\noindent\heiti\zihao{-4}\cnkeywordsname: }#1}
+\newcommand\cnkeywords[1]{ {\noindent\heiti\zihao{3}\cnkeywordsname: }\songti\zihao{-4}#1}
 \newcommand\cnkeywordsname{关键词}
-\newcommand\enkeywords[1]{ {\usefonttimes{\noindent\bfseries\zihao{-4}\enkeywordsname: }#1} }
+\newcommand\enkeywords[1]{ {\usefonttimes{\noindent\bfseries\zihao{3}\enkeywordsname: }\zihao{-4}#1} }
 \newcommand\enkeywordsname{Key words}
 \newenvironment{cnabstract}{
     \newpage
-\chapter*{\ziju{2}{\cnabstractname}}   %%%终于解决了书签乱码的问题 2005-04-12.huangzh
-    \songti\zihao{-4}
+    \begin{center}
+        \vspace*{1\baselineskip} % 段前空一行
+        {\heiti\zihao{2}\bfseries \@title \par}
+        \vspace{1.5em}
+        {\heiti\zihao{3}\bfseries \cnabstractname}
+    \end{center}
+    \addcontentsline{toc}{chapter}{\cnabstractname}
+    \songti\zihao{-4}\linespread{1.5}\selectfont
     \@afterheading}
     {\par}
 
 \newenvironment{enabstract}{
     \newpage
-    \chapter*{\usefonttimes\enabstractname}
-%    \songti\zihao{-4}
-	\usefonttimes
+    \begin{center}
+        \vspace*{1\baselineskip} % 段前空一行
+        {\usefonttimes\zihao{2}\bfseries \the\Etitle \par}
+        \vspace{1.5em}
+        {\usefonttimes\zihao{3}\bfseries \enabstractname}
+    \end{center}
+    \addcontentsline{toc}{chapter}{\enabstractname}
+    \usefonttimes\zihao{-4}\linespread{1.5}\selectfont
     \@afterheading}
     {\par}
 	
@@ -156,9 +168,9 @@
 	
 %%------------------------常用宏包-----------------------------------
 \RequirePackage{amssymb}
-\RequirePackage{unicode-math}
-% \RequirePackage[tbtags]{amsmath}
 \RequirePackage{mathtools}
+\RequirePackage[warnings-off={mathtools-colon,mathtools-overbracket}]{unicode-math}
+% \RequirePackage[tbtags]{amsmath}
 \RequirePackage{extarrows}
 \RequirePackage{ragged2e} % for \RaggedRight macro
 \RequirePackage{booktabs}
@@ -167,7 +179,8 @@
 \RequirePackage{supertabular}
 \RequirePackage{multirow}
 \RequirePackage[amsmath,thmmarks]{ntheorem}% AMSLaTeX宏包.
-\RequirePackage{gbt7714}
+\RequirePackage[sort&compress]{gbt7714} % 引用 gbt7714 宏包
+\citestyle{super} % 设置为上标模式
 \RequirePackage{graphicx}                 % 图形
 \RequirePackage { tikz, pgfplots } % 绘图
 \pgfplotsset { compat = 1.17 }
@@ -327,39 +340,63 @@
 
 \makeatother
 %---------------------------------------------------
-\newcommand\acknowledgement{\chapter*{\ziju{2}结论}}
+\newcommand\acknowledgement{\chapter*{致\hspace{2em}谢}\addcontentsline{toc}{chapter}{致谢}}
 
 %%% ---- 章节标题设置 ----- %%%%
-\ctexset{chapter={format+={\zihao{-2}\usefonttimes},%
-               number={\arabic{chapter}},name={,},afterskip={0.5\baselineskip},beforeskip={0.8\baselineskip}}}      %\zihao{-2}
-\ctexset{section={format+={\zihao{4}\raggedright\usefonttimes},afterskip={0.5\baselineskip},beforeskip={0.5\baselineskip}}}
-\ctexset{subsection={format+={\zihao{-4}\raggedright\usefonttimes},afterskip={0.5\baselineskip},beforeskip={0.5\baselineskip}}}
-\ctexset{subsubsection={format={\zihao{-4}\bf\raggedright\usefonttimes},afterskip={0.5\baselineskip},beforeskip={0.5\baselineskip}}}
+\ctexset{chapter={
+    format={\linespread{1.5}\heiti\zihao{3}\bfseries\centering},
+    name={第,章},
+    number=\chinese{chapter},
+    afterskip={18pt},
+    beforeskip={1\baselineskip}
+}}
+\ctexset{section={
+    format={\linespread{1.5}\heiti\zihao{4}\bfseries\raggedright},
+    afterskip={0pt},
+    beforeskip={0pt}
+}}
+\ctexset{subsection={
+    format={\linespread{1.5}\heiti\zihao{-4}\bfseries\raggedright},
+    afterskip={0pt},
+    beforeskip={0pt}
+}}
+\ctexset{subsubsection={
+    format={\linespread{1.5}\heiti\zihao{-4}\raggedright},
+    afterskip={0pt},
+    beforeskip={0pt}
+}}
 
 \setcounter{tocdepth}{4}
 \setcounter{secnumdepth}{4}
 
 %%% ---- 图表标题设置 ----- %%%%
 \RequirePackage[labelsep=quad]{caption} %% 序号之后空一格写标题
-\captionsetup[table]{textfont=bf}  %%设置表格标题字体为黑体  。2016.06.07
-\renewcommand\figurename{\zihao{-4}\usefonttimes 图}
+\DeclareCaptionFont{wuhao}{\zihao{5}} % 声明五号字体
+\captionsetup{font={bf,wuhao},labelfont={bf,wuhao}} % 全局设为五号黑体
+\captionsetup[table]{position=top}
+\captionsetup[figure]{position=bottom}
 
-\renewcommand\tablename{\bf\zihao{-4}\usefonttimes 表}
+\renewcommand\figurename{图}
+\renewcommand\tablename{表}
+
+\renewcommand{\thefigure}{\thechapter.\arabic{figure}}
+\renewcommand{\thetable}{\thechapter.\arabic{table}}
 
 %%% ------ 目录设置 ------- %%%%
-\ctexset{contentsname={目\qquad 录}}
+\ctexset{contentsname={目\hspace{2em}录}}
  
 \RequirePackage{tocloft} 
-\renewcommand\cftchapfont{\zihao{4}\bf\usefonttimes}
-\renewcommand\cftchappagefont{\zihao{-4}\bf\usefonttimes}
-\renewcommand\cftsecfont{\zihao{-4}\usefonttimes}
-\renewcommand\cftsecpagefont{\zihao{-4}\usefonttimes}
-\renewcommand\cftsubsecfont{\zihao{-4}\usefonttimes}
-\renewcommand\cftsubsecpagefont{\zihao{-4}\usefonttimes}
-\renewcommand\cftsubsubsecfont{\zihao{-4}\usefonttimes}
-\renewcommand\cftsubsubsecpagefont{\zihao{-4}\usefonttimes}
-\renewcommand\cfttoctitlefont{\hfill\zihao{-2}\bf}
-\renewcommand\cftaftertoctitle{\hfill}
+\renewcommand{\cfttoctitlefont}{\hfill\heiti\zihao{3}\bfseries}
+\renewcommand{\cftaftertoctitle}{\hfill}
+\renewcommand{\cftchapfont}{\songti\zihao{4}\bfseries}
+\renewcommand{\cftchappagefont}{\songti\zihao{4}\bfseries}
+\renewcommand{\cftsecfont}{\songti\zihao{-4}}
+\renewcommand{\cftsecpagefont}{\songti\zihao{-4}}
+\renewcommand{\cftsubsecfont}{\songti\zihao{-4}}
+\renewcommand{\cftsubsecpagefont}{\songti\zihao{-4}}
+
+\setlength{\cftbeforechapskip}{0.5em}
+\setlength{\cftbeforesecskip}{0pt}
  
 %%% ------ 脚注设置 ------- %%%%
 \RequirePackage{ctex}

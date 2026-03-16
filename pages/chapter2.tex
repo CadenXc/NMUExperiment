@@ -1,306 +1,101 @@
-\chapter{~\LaTeX~的安装}
+\chapter{实时混合渲染理论基础}
 
-~\LaTeX~的使用需要安装相关的软件，目前主要使用的有两种方式进行~\LaTeX~编辑：
+构建高保真的实时光线追踪混合渲染器，需要跨越物理光学、底层图形 API 架构以及硬件加速算法三个维度的知识壁垒。本章将系统性地阐述基于物理的渲染（PBR）核心数学模型、Vulkan 图形 API 的显式状态管理机制，以及硬件级光线追踪的底层运行原理，为后续章节的混合管线架构设计与具体算法实现提供完备的理论支撑。
+
+\section{基于物理的渲染（PBR）理论模型}
+
+为了在虚拟场景中生成具有高度真实感的材质表现，本系统完全遵循工业标准的基于物理的渲染（Physically Based Rendering, PBR）工作流。PBR 的核心在于严格遵守能量守恒定律，并通过数学模型近似模拟光线与微观物体表面的物理交互。
+
+\subsection{渲染方程（The Rendering Equation）}
+
+计算机图形学中所有的光照计算，本质上都是在求解或近似求解由 Kajiya 于 1986 年提出的渲染方程。对于场景中表面上的任意一点 $p$，其向观察方向 $\omega_o$ 辐射出的总光亮度 $L_o(p, \omega_o)$ 可以表示为：
+
+\begin{equation}
+L_o(p, \omega_o) = L_e(p, \omega_o) + \int_{\Omega} f_r(p, \omega_i, \omega_o) L_i(p, \omega_i) (n \cdot \omega_i) d\omega_i
+\label{eq:rendering_equation}
+\end{equation}
+
+其中：
 \begin{itemize}
-  \item 在线编辑器（Overleaf、TeXPage）
-  \item 本地编辑器（VSCode+插件、TeXShop）
+    \item $L_e(p, \omega_o)$ 表示点 $p$ 自身的自发光辐射亮度。
+    \item $\Omega$ 表示点 $p$ 所在表面的法线上半球空间。
+    \item $f_r(p, \omega_i, \omega_o)$ 为双向反射分布函数（BRDF），描述了从入射方向 $\omega_i$ 来的光线在表面反射到观察方向 $\omega_o$ 的比例。
+    \item $L_i(p, \omega_i)$ 表示来自入射方向 $\omega_i$ 的入射光亮度。
+    \item $(n \cdot \omega_i)$ 为衰减项，即入射光方向与表面法线夹角的余弦值，遵循兰伯特余弦定律。
 \end{itemize}
 
-个人推荐使用Overleaf进行编辑，无需安装本地编译环境，同时还可以进行多人协同操作。但使用在线编辑器的缺点就是必须连接网络。
+在传统的实时光栅化中，该积分项通常被极度简化（如仅计算几个点光源的解析解）。而在本课题中，我们将利用光线追踪技术，通过蒙特卡洛积分（Monte Carlo Integration）对该半球空间进行随机采样，以逼近该方程的真实解。
 
-\section{Overleaf的使用}
+\subsection{Cook-Torrance 微面元模型}
 
-进入到Overleaf首页：\url{https://www.overleaf.com}，点击右上角Register注册新账户。登录成功后如图\ref{fig:2-overlead-home}所示，会进入到项目界面。
+为了精确描述材质的 BRDF 函数 $f_r$，本系统采用了广泛应用于现代游戏引擎的 Cook-Torrance 微面元模型。该模型假设所有物体表面在微观尺度下均由无数个绝对光滑的微小镜面组成。BRDF 被拆分为漫反射（Diffuse）与镜面反射（Specular）两部分：
 
-\begin{figure}[htb]
-  \centering
-  \includegraphics[width=0.9\textwidth]{figures/chapter2/overleaf-home.png}
-  \caption{Overleaf项目页面}
-  \label{fig:2-overlead-home}
-\end{figure}
+\begin{equation}
+f_r = k_d f_{diffuse} + k_s f_{specular}
+\end{equation}
 
-此时你需要将使用的模板下载至本地。以此项目为例，进入\url{https://github.com/Nagico/WHUExperiment}，点击Download ZIP即可将模板下载到本地。该模板同时也一同放至本文档旁，可以直接使用，但仍建议从Github上下载最新版本的模板。
+其中 $k_d$ 和 $k_s$ 分别代表折射（漫反射）和反射（镜面高光）的能量比例，且满足能量守恒 $k_d + k_s \le 1$。镜面反射项的计算公式为：
 
-\begin{figure}[htb]
-    \centering
-    \includegraphics[width=0.95\textwidth]{figures/chapter2/download-repo.png}
-    \caption{下载模板}
-    \label{fig:2-github-download}
-\end{figure}
+\begin{equation}
+f_{specular} = \frac{D(h) F(v, h) G(l, v, h)}{4 (n \cdot l)(n \cdot v)}
+\end{equation}
 
-在Overleaf页面点击左侧的New Project，选择Upload Project，将下载的ZIP文件上传，即可将模板导入至Overleaf。
+\begin{itemize}
+    \item \textbf{法线分布函数 D (Normal Distribution Function)}：本系统采用 GGX (Trowbridge-Reitz) 分布，用于计算微观法线与半程向量 $h$ 对齐的微面元比例，直接决定了高光的粗糙度（Roughness）与光晕形状。
+    \item \textbf{菲涅尔方程 F (Fresnel Equation)}：采用 Schlick 近似法，描述了不同观察角度下表面反射光线与折射光线的比例，用于区分金属与非金属（绝缘体）的光学特性。
+    \item \textbf{几何遮蔽函数 G (Geometry Function)}：采用 Smith 联合遮蔽阴影函数，用于模拟微面元之间相互遮挡（Shadowing）与遮蔽（Masking）导致的能量流失。
+\end{itemize}
 
-\begin{figure}[htb]
-  \centering
-  \includegraphics[width=0.3\textwidth]{figures/chapter2/upload-project.png}
-  \caption{导入模板}
-  \label{fig:2-upload-project}
-\end{figure}
+% [此处插入图2-1：微面元光照反射与几何遮蔽示意图]
+% \begin{figure}[htb]
+%   \centering
+%   \includegraphics[width=0.6\textwidth]{figures/chapter2/microfacet.png}
+%   \caption{微面元光照反射与几何遮蔽示意图}
+%   \label{fig:microfacet}
+% \end{figure}
 
-导入后会自动跳转到编辑界面，需要点击左上角的Menu进入设置界面，将Compiler修改为XeLatex以支持中文（图\ref{fig:2-compiler}）。
+\section{现代图形 API 与 Vulkan 核心特性}
 
-\begin{figure}[H]
-  \centering
-  \begin{subfigure}{0.55\textwidth}
-    \includegraphics[width=\linewidth]{figures/chapter2/menu.png}
-    \caption{Menu按钮}
-    \label{fig:2-menu}
-  \end{subfigure}\qquad
-  \begin{subfigure}{0.3\textwidth}
-    \includegraphics[width=\linewidth]{figures/chapter2/xelatex.png}
-    \caption{选择Compiler}
-    \label{fig:2-compiler}
-  \end{subfigure}
-  \caption{配置~\LaTeX~}
-  \label{fig:2-latex-conf}
-\end{figure}
+本课题选择 Vulkan 1.3 作为底层图形 API，而非传统的 OpenGL。Vulkan 是一种显式（Explicit）、低开销的跨平台图形接口，其架构设计极大地契合了现代多核 CPU 与高度并行化 GPU 的特性。
 
-修改成功后点击Recompile重新编辑，即可正常使用。你可以在左侧进行项目文件的管理，后续所需的图片可以在相应文件夹处右键，选择Upload上传。
+\subsection{指令缓冲与队列提交（Command Buffers \& Queues）}
 
-\begin{figure}[htb]
-  \centering
-  \includegraphics[width=0.95\textwidth]{figures/chapter2/overleaf-edit.png}
-  \caption{Overleaf编辑页面}
-  \label{fig:2-overleaf-edit}
-\end{figure}
+在 Vulkan 中，所有的渲染绘制与内存拷贝指令不再直接发送给显卡驱动，而是由开发者显式地录制到指令缓冲（Command Buffer）中。录制完成的指令缓冲会被提交至 GPU 的特定队列（Graphics Queue, Compute Queue 或 Transfer Queue）中异步执行。这种机制使得本系统的混合渲染架构能够利用多线程在 CPU 端并行录制光栅化与光追的渲染指令，彻底消除了传统 API 的单线程驱动瓶颈。
 
-\section{本地编辑器}
+\subsection{显式的资源管线屏障（Pipeline Barriers）}
 
-\subsection{~\LaTeX~环境安装}
+延迟渲染与光线追踪的混合管线对资源的读写顺序有着极其严苛的要求。例如，光栅化阶段必须先完成 G-Buffer 中深度和法线纹理的写入，随后的光线追踪计算着色器才能对其进行采样。
 
-在清华源中下载Tex Live镜像文件：\url{https://mirrors.tuna.tsinghua.edu.cn/CTAN/systems/texlive/Images/texlive.iso}，下载成功后双击挂载iso文件。
+在 Vulkan 中，驱动程序默认不会进行任何隐式同步。本系统必须通过插入显式的管线屏障（Pipeline Memory Barrier），手动定义资源的布局转换（Layout Transition，如从 COLOR\_ATTACHMENT\_OPTIMAL 转换为 SHADER\_READ\_ONLY\_OPTIMAL）与访问权限转移（Access Masks）。对管线屏障的精准控制，是构建高性能无冲突渲染器的核心难点。
 
+\section{硬件加速光线追踪技术原理}
 
-\begin{figure}[htb]
-  \centering
-  \includegraphics[width=0.95\textwidth]{figures/chapter2/texlive-iso.png}
-  \caption{Tex Live镜像}
-  \label{fig:2-texlive-iso}
-\end{figure}
+本系统利用 NVIDIA RTX 系列显卡提供的 RT Core 专用硬件单元，实现了射线与几何体的极速求交计算。Vulkan 通过标准扩展（KHR）暴露了这些硬件能力，主要依赖以下核心技术：
 
-Windows下直接打开install-tl-windows.bat，Linux/Mac用户在终端下输入：
+\subsection{树状加速结构（Acceleration Structures）}
 
-\begin{lstlisting}[language=bash]
-  ./install-tl
-\end{lstlisting}
+在包含数百万个三角形的复杂 3D 场景中，让每条光线与所有三角形进行暴力求交是不现实的。Vulkan 将场景几何组织为层次包围盒树（BVH），并抽象为两种数据结构：
+\begin{itemize}
+    \item \textbf{底层加速结构（BLAS, Bottom-Level AS）}：直接包含网格的顶点与索引数据。通常为静态模型构建一次即可。
+    \item \textbf{顶层加速结构（TLAS, Top-Level AS）}：包含指向各个 BLAS 的实例（Instance），并附带每个实例的 3D 变换矩阵（Transform Matrix）与材质 ID。在场景物体发生位移时，只需轻量级地更新 TLAS，而无需重建沉重的 BLAS。
+\end{itemize}
 
-使用默认配置进行安装。
+% [此处插入图2-2：BLAS 与 TLAS 两级加速结构示意图]
+% \begin{figure}[htb]
+%   \centering
+%   \includegraphics[width=0.8\textwidth]{figures/chapter2/as_structure.png}
+%   \caption{BLAS 与 TLAS 两级加速结构示意图}
+%   \label{fig:as_structure}
+% \end{figure}
 
-\begin{figure}[htb]
-  \centering
-  \includegraphics[width=0.4\textwidth]{figures/chapter2/texlive-install.png}
-  \caption{Tex Live安装}
-  \label{fig:2-texlive-install}
-\end{figure}
+\subsection{两种光线追踪执行范式}
 
-详细安装过程和注意事项请参考：\url{https://github.com/OsbertWang/install-latex-guide-zh-cn/releases/latest/}
-
-\subsection{VSCode配置}
-
-Tex Live自带的编辑器不太好用，个人一般使用VSCode配合LaTeX Workshop插件。
-
+在 Vulkan 中，本系统综合利用了两种不同的光追扩展接口，以达到性能与功能的最佳平衡：
 \begin{enumerate}
-  \item 点击拓展图标，打开拓展
-  \item 输入"latex workshop"，选择第一个LaTeX Workshop插件
-  \item 点击"install"进行安装，等待安装完成（如图\ref{fig:2-plugin-install}）
+    \item \textbf{Ray Query (光线查询，基于 VK\_KHR\_ray\_query)}：允许在任何现有的着色器（如片段着色器或计算着色器）中隐式定义光线并调用 rayQueryEXT 指令遍历 TLAS。其执行逻辑是在单线程内同步阻塞的，没有复杂的着色器绑定表（SBT）开销。本系统主要利用其进行局部的直接光软硬阴影（Shadow Ray）测试。
+    \item \textbf{RT Pipeline (光线追踪管线，基于 VK\_KHR\_ray\_tracing\_pipeline)}：一种全新的管线状态对象。光线通过光线生成着色器（RayGen）发射，在遍历 BVH 的过程中，由 GPU 硬件自动调度并触发未命中着色器（Miss）或最近命中着色器（ClosestHit）。它支持递归调用（如光线反弹）以及自定义载荷（Payload）传递，是本系统计算多重镜面反射与全局光照的核心方案。
 \end{enumerate}
 
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.95\textwidth]{figures/chapter2/plugin-install.png}
-  \caption{LaTeX Workshop插件安装}
-  \label{fig:2-plugin-install}
-\end{figure}
+\section{本章小结}
 
-\begin{enumerate}
-  \item 点击设置图标
-  \item 点击设置
-  \item 转到 UI 设置页面（如图\ref{fig:2-vscode-settings}）
-  \item 点击右上侧图标打开JSON配置文件，进入代码设置页面（如图\ref{fig:2-vscode-json}）
-\end{enumerate}
-
-\begin{figure}[H]
-  \centering
-  \begin{subfigure}{0.45\textwidth}
-    \includegraphics[width=\linewidth]{figures/chapter2/vscode-settings.png}
-    \caption{UI设置界面}
-    \label{fig:2-vscode-settings}
-  \end{subfigure}\qquad
-  \begin{subfigure}{0.45\textwidth}
-    \includegraphics[width=\linewidth]{figures/chapter2/vscode-json.png}
-    \caption{JSON配置文件}
-    \label{fig:2-vscode-json}
-  \end{subfigure}
-  \caption{配置~\LaTeX~}
-  \label{fig:2-vscode-conf}
-\end{figure}
-
-在JSON文件内输入以下内容：
-
-由于PDF内代码不好复制，JSON内容请参考：\url{https://zhuanlan.zhihu.com/p/166523064}\quad \textbf{6.1 LaTeX配置代码展示}处
-
-\begin{lstlisting}[language=json]
-  {
-    "latex-workshop.latex.autoBuild.run": "never",
-    "latex-workshop.showContextMenu": true,
-    "latex-workshop.intellisense.package.enabled": true,
-    "latex-workshop.message.error.show": false,
-    "latex-workshop.message.warning.show": false,
-    "latex-workshop.latex.tools": [
-        {
-            "name": "xelatex",
-            "command": "xelatex",
-            "args": [
-                "-synctex=1",
-                "-interaction=nonstopmode",
-                "-file-line-error",
-                "%DOCFILE%"
-            ]
-        },
-        {
-            "name": "pdflatex",
-            "command": "pdflatex",
-            "args": [
-                "-synctex=1",
-                "-interaction=nonstopmode",
-                "-file-line-error",
-                "%DOCFILE%"
-            ]
-        },
-        {
-            "name": "latexmk",
-            "command": "latexmk",
-            "args": [
-                "-synctex=1",
-                "-interaction=nonstopmode",
-                "-file-line-error",
-                "-pdf",
-                "-outdir=%OUTDIR%",
-                "%DOCFILE%"
-            ]
-        },
-        {
-            "name": "bibtex",
-            "command": "bibtex",
-            "args": [
-                "%DOCFILE%"
-            ]
-        }
-    ],
-    "latex-workshop.latex.recipes": [
-        {
-            "name": "XeLaTeX",
-            "tools": [
-                "xelatex"
-            ]
-        },
-        {
-            "name": "PDFLaTeX",
-            "tools": [
-                "pdflatex"
-            ]
-        },
-        {
-            "name": "BibTeX",
-            "tools": [
-                "bibtex"
-            ]
-        },
-        {
-            "name": "LaTeXmk",
-            "tools": [
-                "latexmk"
-            ]
-        },
-        {
-            "name": "xelatex -> bibtex -> xelatex*2",
-            "tools": [
-                "xelatex",
-                "bibtex",
-                "xelatex",
-                "xelatex"
-            ]
-        },
-        {
-            "name": "pdflatex -> bibtex -> pdflatex*2",
-            "tools": [
-                "pdflatex",
-                "bibtex",
-                "pdflatex",
-                "pdflatex"
-            ]
-        },
-    ],
-    "latex-workshop.latex.clean.fileTypes": [
-        "*.aux",
-        "*.bbl",
-        "*.blg",
-        "*.idx",
-        "*.ind",
-        "*.lof",
-        "*.lot",
-        "*.out",
-        "*.toc",
-        "*.acn",
-        "*.acr",
-        "*.alg",
-        "*.glg",
-        "*.glo",
-        "*.gls",
-        "*.ist",
-        "*.fls",
-        "*.log",
-        "*.fdb_latexmk"
-    ],
-    "latex-workshop.latex.autoClean.run": "onFailed",
-    "latex-workshop.latex.recipe.default": "lastUsed",
-    "latex-workshop.view.pdf.internal.synctex.keybinding": "double-click"
-}
-\end{lstlisting}
-
-\subsection{VSCode编译}
-
-此时你需要将使用的模板下载至本地。以此项目为例，进入\url{https://github.com/Nagico/WHUExperiment}，点击Download ZIP即可将模板下载到本地。该模板同时也一同放至本文档旁，可以直接使用，但仍建议从Github上下载最新版本的模板。
-
-\begin{figure}[htb]
-  \centering
-  \includegraphics[width=0.95\textwidth]{figures/chapter2/download-repo.png}
-  \caption{下载模板}
-  \label{fig:2-github-download-2}
-\end{figure}
-
-将项目解压后用VSCode打开文件夹，点击选中 tex 文件，进行文件内容查看。
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.9\textwidth]{figures/chapter2/vscode-open.png}
-  \caption{打开项目文件夹}
-  \label{fig:2-vscode-open-folder}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.9\textwidth]{figures/chapter2/vscode-openfile.png}
-  \caption{打开Tex文件}
-  \label{fig:2-vscode-open-file}
-\end{figure}
-
-由于项目中会涉及参考文献的引用（.bib的编译），故而选择xelatex -> bibtex -> xelatex*2编译链。
-
-\begin{figure}[htb]
-  \centering
-  \includegraphics[width=0.8\textwidth]{figures/chapter2/vscode-compile.png}
-  \caption{Tex编译}
-  \label{fig:2-vscode-tex-compile}
-\end{figure}
-
-点击编辑界面的右上角图标，即可查看编译结果。
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.95\textwidth]{figures/chapter2/vscode-edit.png}
-  \caption{Tex编译结果}
-  \label{fig:2-vscode-edit}
-\end{figure}
-
-更多VSCode配置可参考网上Blog，实现双向自动跳转等功能。新版VSCode、插件与以前有一定差别，最好选择2022年及以后较新的Blog学习。
+本章详细探讨了混合渲染器底层的理论基础。首先引入了渲染方程与 Cook-Torrance PBR 材质模型，明确了物理正确光照的计算公式；其次剖析了 Vulkan 图形 API 的指令录制与显式同步机制，揭示了底层状态管理的复杂性；最后阐述了基于 BVH 加速结构与两套 Vulkan 扩展指令的光线追踪运行原理。这些理论模型不仅定义了本课题“算什么”，更决定了本课题在 GPU 上“怎么算”，为第三章系统架构与 Render Graph 的设计奠定了坚实的基础。

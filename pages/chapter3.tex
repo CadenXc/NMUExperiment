@@ -1,45 +1,66 @@
-\chapter{模板使用教程}
- 
-\section{Readme}
+\chapter{基于 Render Graph 的渲染器架构设计}
 
-模板文件的结构, 如下表所示:
- \begin{table}[ht]\centering
-\begin{tabular}{r|r|l}
-	\hline\hline
-	\multicolumn{2}{l|}{main.tex }       & 主文档. 在其中填写首页信息、正文引用、参考文献引用             \\ \hline
-                                    & chapter$x$.tex & 第$x$章节正文            \\ \cline{2-3}
-                                    & appendix$x$.tex & 附录$x$             \\ \cline{2-3}
-    \raisebox{1em}{pages 文件夹}   & frontmatter.tex & 郑重声明、摘要               \\ \cline{2-3}
-	 &  backmatter.tex & 实验结论                      \\ \hline
-	\multicolumn{2}{l|}{figures 文件夹}                  & 存放图片文件               \\ \hline
-    \multicolumn{2}{l|}{ref 文件夹}                  & 存放bib参考文献文件                   \\ \hline
-	\multicolumn{2}{l|}{WHUExperiment.cls }             & 定义文档格式的 class file, 不可删除 \\ \hline\hline
-\end{tabular}
-\end{table}
+\section{混合渲染管线总体架构}
+本系统的混合渲染管线被解耦为多个功能单一的渲染通道（Render Pass）。在 Render Graph 架构下，整个渲染流程不再是线性的函数调用，而是被抽象为一张由“计算节点”与“数据流”构成的图结构。
 
-无需也不要改变、移动上述文档的位置。
+本系统的核心管线总体架构由以下四个关键阶段节点（Pass Nodes）构成：
 
-如果不习惯用~\verb|\include{ }|~的方式加入“子文档”，当然可以把它们合并在主文档，成为一个文档。
-({\kaishu 但是这样并不会给我们带来方便。})
+\begin{enumerate}
+    \item \textbf{几何缓冲通道（G-Buffer Pass）}：作为整个图结构的输入端，采用传统光栅化管线。负责提取场景中可见几何体的物理属性，输出包含反照率（Albedo）、世界空间法线（Normal）、深度（Depth）、材质参数（Metallic/Roughness）以及运动矢量（Motion Vector）的多张屏幕空间纹理。
+    
+    \item \textbf{光线追踪通道（Ray Tracing Pass）}：声明对 G-Buffer 纹理的读取依赖。利用 Vulkan 硬件加速指令，基于几何法线与深度重建世界空间坐标，并发射射线计算硬/软阴影与镜面反射，输出原始的 1 SPP（Sample Per Pixel）光照噪点图。
+    
+    \item \textbf{时空降噪通道（SVGF Denoising Pass）}：包含多个计算着色器（Compute Shader）子节点。接收上一帧的历史累积缓冲与当前帧的光追输出，利用运动矢量进行时域重投影，并进行多轮 A-Trous 空域滤波，输出平滑的光照信号。
+    
+    \item \textbf{合成与后处理通道（Composition \& Post-Process Pass）}：处于图结构的末端。将降噪后的光照信号与 G-Buffer 中的基础颜色进行物理调制（Modulate），最后执行色调映射（Tone Mapping）输出至交换链（Swapchain）呈现给终端用户。
+\end{enumerate}
 
- \section{具体使用步骤}
+% [此处插入图3-1：基于 Render Graph 的混合渲染管线总体拓扑图]
+% \begin{figure}[htb]
+%   \centering
+%   \includegraphics[width=0.8\textwidth]{figures/chapter3/render_graph_topology.png}
+%   \caption{基于 Render Graph 的混合渲染管线总体拓扑图}
+%   \label{fig:render_graph_topology}
+% \end{figure}
 
- \begin{description}
-  \item[Step 1]  打开主文档 main.tex，填写题目、学生姓名等等信息，书写正文。
-  \item[Step 2]  进入 pages 文件夹，打开 frontmatter.tex，backmatter.tex 这两个文档,
-  分别填写 (1) 中文摘要，(2) 实验结论。并根据实际情况创建chapter tex文件书写正文。
-  \item[Step 3]  打开主文档，在正文部分修改include的文件，注意此时不需要tex后缀名。
-  \item[Step 4]  导入bib参考文献，在文档中引用。 
-  \item[Step 5]  使用 XeLaTeX 编译。
-\end{description}
+\section{Render Graph 核心机制与数据结构}
+为了在 C++ 中用面向对象的方式描述上述管线，本系统设计了一套轻量级的虚拟资源与节点管理机制。Render Graph 的核心数据结构由“虚拟资源（Virtual Resource）”与“渲染通道（Pass Node）”两部分组成。
 
-\section{其他}
+\subsection{虚拟资源池化管理}
+在图的构建阶段（Setup Phase），系统并不立即调用 Vulkan API 分配物理显存（VkImage 或 VkBuffer），而是分配轻量级的虚拟资源句柄（Virtual Resource Handle）。
 
-自此，~\LaTeX~安装与模板使用说明已介绍完毕。接下来的章节会以本模板支持的命令为例，讲解~\LaTeX~的使用方法。请将PDF配合Tex源码一同学习，可自行修改相关命令，查看效果。
+系统定义了 TextureResource 与 BufferResource 数据结构，记录资源的分辨率、格式（Format）与生命周期。只有在 Render Graph 编译阶段（Compile Phase），系统才会通过计算各资源的生命周期区间，利用 Vulkan 内存分配器（VMA, Vulkan Memory Allocator）为生命周期不重叠的资源进行物理内存的别名复用（Memory Aliasing），从而极大降低了系统整体的显存占用峰值。
 
-其中 Chapter \ref{cha:latex-brief-intro}将简要的介绍~\LaTeX~使用方法，包括多级标题、字体样式、字号调节、定理与公式、图片与表格的简单使用。初次学习可以参考此章节。
+\subsection{渲染通道构建器（Pass Builder）}
+每个具体的渲染阶段通过继承基类 RenderPass 实现。每个 Pass 在执行具体的 GPU 录制之前，必须通过 PassBuilder 显式声明其对虚拟资源的依赖关系：
+\begin{itemize}
+    \item \textbf{Read(ResourceHandle)}：声明该通道需要读取该资源，向图中添加一条从资源到节点的有向边。
+    \item \textbf{Write(ResourceHandle)}：声明该通道将覆写或创建该资源，向图中添加一条从节点到资源的有向边。
+\end{itemize}
+通过这种声明式 API，Render Graph 能够在 CPU 端静态捕获所有节点间的数据依赖，进而构建出完整的有向无环图。
 
+\section{资源状态与显存屏障（Barrier）的自动推导}
+Vulkan 规范要求，当同一个资源在不同管线阶段（Pipeline Stages）被连续访问，且至少有一次是写操作时，必须插入显式的管线屏障（VkImageMemoryBarrier 或 VkBufferMemoryBarrier）。本系统 Render Graph 的最大技术贡献，在于实现了屏障的自动推导引擎。
 
- \vfill
+\subsection{拓扑排序与执行剔除}
+在图编译阶段，系统首先利用深度优先搜索（DFS）算法对构建好的有向无环图进行拓扑排序（Topological Sort），确定所有渲染通道的线性执行序列。同时，如果某个 Pass 产生的输出资源最终没有被终端节点（如交换链输出）所依赖，系统会将其视为冗余计算（Dead Code）并将其从执行队列中剔除，从而实现极致的性能优化。
 
-本文档下载更新地址：\url{https://github.com/Nagico/WHUExperiment}. 使用之前，请移步查看是否有更新。
+\subsection{屏障参数的动态化生成}
+在执行排序后的线性队列时，Render Graph 会通过维护一个全局的资源状态跟踪器（Resource State Tracker），记录每个物理资源当前的访问掩码（Access Mask）与图像布局（Image Layout）。
+
+当相邻的通道 Pass\_A 与 Pass\_B 对同一个图像资源 R 产生依赖时，系统通过查表机制自动推导屏障参数：
+\begin{enumerate}
+    \item \textbf{状态转换（Layout Transition）}：假设 Pass\_A 是 G-Buffer 生成阶段，其将 R 作为颜色附件写入，此时 R 处于 VK\_IMAGE\_LAYOUT\_COLOR\_ATTACHMENT\_OPTIMAL 状态；Pass\_B 为光线追踪阶段，需将 R 作为纹理进行采样。系统会自动生成屏障，将其布局安全地转换为 VK\_IMAGE\_LAYOUT\_SHADER\_READ\_ONLY\_OPTIMAL。
+    \item \textbf{读写同步（Execution Dependency）}：系统自动设置 srcStageMask 为颜色附件输出阶段，dstStageMask 为计算着色器阶段，强制 GPU 在执行 Pass\_B 的纹理读取前，必须等待 Pass\_A 的像素写入操作彻底刷新至显存（Flush to VRAM），从根本上避免了经典的渲染撕裂与数据过期（Stale Data）问题。
+\end{enumerate}
+
+% [此处插入图3-2：资源状态自动推导与屏障插入机制原理图]
+% \begin{figure}[htb]
+%   \centering
+%   \includegraphics[width=0.8\textwidth]{figures/chapter3/barrier_derivation.png}
+%   \caption{资源状态自动推导与屏障插入机制原理图}
+%   \label{fig:barrier_derivation}
+% \end{figure}
+
+\section{本章小结}
+本章详细阐述了基于 Render Graph 的渲染引擎架构设计。针对 Vulkan 显式状态管理的复杂性，本系统摒弃了传统的硬编码调度模式，设计了包含虚拟资源句柄与有向无环图分析的自动化管线系统。通过拓扑排序与资源状态跟踪机制，系统成功实现了管线依赖关系的自动解耦、冗余阶段的动态剔除以及显存屏障的安全推导。该架构不仅彻底解决了混合渲染管线中多阶段（光栅化、光线追踪、计算着色器）穿插执行的同步难题，更为第四章各种光照算法的高效实现与快速迭代提供了一个强健、现代化的系统底层底座。

@@ -1,41 +1,29 @@
-\chapter{其它格式}
-\section{代码}
-\subsection{原始代码}
-朴实的代码块：
+\chapter{总结与展望}
 
-使用 verbatim 环境可以得到如下原样的输出。
-\begin{verbatim}
-print("Hello world!")
-\end{verbatim}
+\section{全文工作总结}
 
-使用 listings 包提供的 lstlisting 环境可以对代码进行进一步的格式化，minted 包所提供的 minted 环境还可以对代码进行高亮。更多定制功能请自行参照文档配置。
+随着图形硬件算力的不断攀升，基于物理的实时光线追踪已成为现代三维渲染引擎发展的必然趋势。然而，如何在有限的算力与苛刻的实时帧率预算下，平衡蒙特卡洛积分带来的高频噪声与全局光照的高保真画质，是当前图形学界面临的核心挑战。针对这一问题，本文基于 Vulkan 1.3 现代图形 API，从零设计并实现了一套完整的实时光线追踪混合渲染系统。
 
-\begin{lstlisting}[language=c, caption=C语言代码]
-    printf("Hello world!");
-\end{lstlisting}
+回顾全文，本课题主要完成了以下三项极具工程与理论价值的核心工作：
 
-\subsection{算法描述/伪代码}
-参考 \href{https://en.wikibooks.org/wiki/LaTeX/Algorithms}{Algorithms} 与 algorithm2e 文档，给出一个简单的示例，见算法 \ref{alg:alg1}。
+\begin{enumerate}
+    \item \textbf{构建了数据驱动的 Render Graph 调度架构}：针对 Vulkan 显式 API 极易引发显存状态冲突的痛点，设计了基于有向无环图（DAG）的虚拟资源与渲染通道管理机制。通过拓扑排序与资源状态跟踪，系统实现了管线屏障（Pipeline Barriers）的自动化推导与冗余计算的动态剔除，极大地提升了底层渲染引擎的稳定性与开发迭代效率。
+    
+    \item \textbf{实现了精确的混合光照物理管线}：解耦了几何提取与光照计算阶段。在延迟渲染 G-Buffer 的基础上，创新性地结合了两种硬件加速特性。利用 Ray Query 扩展实现了无自交伪影的直接光软硬阴影；利用 RT Pipeline 机制深入求解 Cook-Torrance 微面元模型，实现了极其逼真的多次镜面反射与材质光照交互。
+    
+    \item \textbf{集成了高效的 SVGF 时空联合降噪算法}：针对 1 SPP 极低采样率导致的光追噪点问题，构建了完整的降噪数据流。通过 G-Buffer 提取的运动矢量进行时域历史帧重投影累积，并结合深度、法线一致性检验解决动态拖影；在空域上实时估算局部方差，引导多轮 A-Trous 边缘保留滤波。最终在 2K 分辨率下，以极小的毫秒级性能开销，输出了一张平滑、无噪点且细节丰富的照片级画面。
+\end{enumerate}
 
-\begin{algorithm}[H]
-  \SetAlgoLined
-  \KwData{this text}
-  \KwResult{how to write algorithm with \LaTeXe}
-  initialization\;
-  \While{not at end of this document}{
-    read current\;
-    \eIf{understand}{
-      go to next section\;
-      current section becomes this one\;
-    }{
-      go back to the beginning of current section\;
-    }
-  }
-  \caption{如何写算法}\label{alg:alg1}
-\end{algorithm}
+综上所述，本文实现的混合渲染器成功兼顾了“实时交互（$> 60$ FPS）”与“物理真实（PBR + Ray Tracing）”，为下一代图形应用的底层架构提供了一套切实可行的高性能解决方案。
 
-\section{绘图}
-关于使用 \LaTeX{} 绘图的更多例子，请参考 \href{https://www.overleaf.com/learn/latex/Pgfplots_package}{Pgfplots package}。一般建议使用如 Photoshop、PowerPoint 等制图，再转换成 PDF 等格式插入。
+\section{未来研究方向}
 
-\section{写在最后}
-工具不重要，对工具的合理运用才重要。希望本模板对大家的论文写作有所帮助。
+尽管本系统已初步实现了高质量的实时混合渲染，但距离工业界最顶尖的商业引擎（如虚幻引擎 5）仍有进一步的优化与拓展空间。未来的研究方向主要集中在以下三个方面：
+
+\begin{enumerate}
+    \item \textbf{引入时域抗锯齿与超分辨率技术}：目前的 SVGF 降噪算法主要针对光照信号，但由于光栅化阶段在 2K 原生分辨率下进行，几何边缘仍可能存在轻微的走样（Aliasing）。未来可引入时域抗锯齿（TAA）或集成 NVIDIA DLSS / AMD FSR 等基于深度学习的超分辨率技术，在降低原生渲染分辨率（提升帧率）的同时，重建出更高质量的图像边缘。
+    
+    \item \textbf{支持更复杂的多光源采样算法（ReSTIR）}：当前系统在处理多光源（如场景中存在数百个动态点光源）时，直接光照计算的开销会急剧增加。未来考虑引入时空储层重采样（ReSTIR, Spatiotemporal Reservoir Resampling）算法，在极低算力下实现海量动态光源的物理精确采样。
+    
+    \item \textbf{向纯路径追踪（Path Tracing）演进}：混合渲染是当前硬件算力下的折中方案。随着未来 GPU RT Core 算力的进一步爆发，可尝试在 Render Graph 中逐步剥离光栅化 G-Buffer 依赖，将渲染管线完全重构为基于硬件的实时路径追踪（Real-Time Path Tracing, RTPT），以追求极致的全局光照物理正确性。
+\end{enumerate}

@@ -1,0 +1,70 @@
+\begin{thebibliography}{10}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{#1}
+\expandafter\ifx\csname urlstyle\endcsname\relax\else
+  \urlstyle{same}\fi
+\expandafter\ifx\csname href\endcsname\relax
+  \DeclareUrlCommand\doi{\urlstyle{rm}}
+  \def\eprint#1#2{#2}
+\else
+  \def\doi#1{\href{https://doi.org/#1}{\nolinkurl{#1}}}
+  \let\eprint\href
+\fi
+
+\bibitem[Akenine-M\"{o}ller et~al.(2018)Akenine-M\"{o}ller, Haines, and Hoffman]{AkenineMoller2018RealTime}
+AKENINE-M\"{o}LLER T, HAINES E, HOFFMAN N.
+\newblock Real-time rendering\allowbreak[M].
+\newblock 4th ed.
+\newblock A K Peters/CRC Press, 2018.
+
+\bibitem[Kajiya(1986)]{Kajiya1986Rendering}
+KAJIYA J~T.
+\newblock The rendering equation\allowbreak[J].
+\newblock ACM SIGGRAPH Computer Graphics, 1986, 20\allowbreak (4): 143-150.
+
+\bibitem[Haines et~al.(2019)Haines and Akenine-M\"{o}ller]{Haines2019RayTracingGems}
+HAINES E, AKENINE-M\"{o}LLER T.
+\newblock Ray tracing gems: high-quality and real-time rendering with DXR and other APIs\allowbreak[M].
+\newblock Apress, 2019.
+
+\bibitem[Schied et~al.(2017)Schied, Salvi, Kaplanyan, Wyman, Patney, Chaitanya, Antonik, and Lefohn]{Schied2017SVGF}
+SCHIED C, SALVI M, KAPLANYAN A~S, et~al.
+\newblock Spatiotemporal variance-guided filtering: real-time reconstruction for path-traced global illumination\allowbreak[C]//\allowbreak
+Proceedings of High Performance Graphics.
+\newblock 2017: 1-10.
+
+\bibitem[Sellers et~al.(2016)Sellers and Kessenich]{Sellers2016Vulkan}
+SELLERS G, KESSENICH J.
+\newblock Vulkan programming guide: the official guide to learning vulkan\allowbreak[M].
+\newblock Addison-Wesley Professional, 2016.
+
+\bibitem[Karis(2013)]{Karis2013RealShading}
+KARIS B.
+\newblock Real shading in unreal engine 4\allowbreak[C]//\allowbreak
+ACM SIGGRAPH 2013 Courses: Physically Based Shading in Theory and Practice.
+\newblock 2013.
+
+\bibitem[Pharr et~al.(2016)Pharr, Jakob, and Humphreys]{Pharr2016PBR}
+PHARR M, JAKOB W, HUMPHREYS G.
+\newblock Physically based rendering: from theory to implementation\allowbreak[M].
+\newblock 3rd ed.
+\newblock Morgan Kaufmann, 2016.
+
+\bibitem[蔡至诚(2022)]{Cai2022Hybrid}
+蔡至诚.
+\newblock 混合实时渲染关键技术研究\allowbreak[D].
+\newblock 杭州: 浙江大学, 2022.
+
+\bibitem[{NVIDIA Corporation}(2024)]{NVIDIA2024Tutorial}
+{NVIDIA Corporation}.
+\newblock Vulkan ray tracing tutorial\allowbreak[EB/OL].
+\newblock 2024\allowbreak[2024-03-16].
+\newblock \url{https://github.com/nvpro-samples/vk_raytracing_tutorial_KHR}.
+
+\bibitem[{Khronos Group}(2024)]{Khronos2024Vulkan}
+{Khronos Group}.
+\newblock Vulkan 1.3 specification\allowbreak[M/OL].
+\newblock 2024\allowbreak[2024-03-16].
+\newblock \url{https://registry.khronos.org/vulkan/}.
+
+\end{thebibliography}

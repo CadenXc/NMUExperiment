@@ -1,319 +1,87 @@
-\chapter{简要~\LaTeX~使用说明}\label{cha:latex-brief-intro}
+\chapter{混合光照管线的核心设计与实现}
 
-\section{控制单位}
+\section{几何信息提取：延迟渲染 G-Buffer 构建}
 
-LaTeX里可使用的单位包括：
-\begin{itemize}
-    \item 毫米\ \verb|1mm|
-    \item 厘米\ \verb|1cm|
-    \item 英寸\ \verb|1in|
-    \item 像素\ \verb|1pt|
-    \item 基础文本尺寸的宽度\ \verb|1em|
-    \item 基础文本尺寸的高度\ \verb|1ex|
-    \item 字符宽度或行宽度的百分比值\ \verb|0.2\textwidth|
-    \item 字符高度或行高度的百分比值\ \verb|0.2\textheight|
-\end{itemize}
+作为混合渲染管线的起始节点，G-Buffer 构建阶段（Geometry Pass）完全依托于 Vulkan 的传统光栅化（Rasterization）管线。其核心目标是以极高的并行效率，将摄像机视锥体内可见几何体的三维物理属性，映射并存储至二维的屏幕空间多渲染目标（Multiple Render Targets, MRT）中。
 
-\section{特殊符号}
+\subsection{多渲染目标（MRT）显存布局设计}
 
-~\LaTeX~中有些符号无法正常显示，比如：\# \quad \% \quad \& \quad \{ \quad \} \quad \~{} \quad \_{} \quad \textbackslash \quad \backslash \quad \^{} \quad \$ 等控制符号，错误的在代码中使用会产生Error报错，并且很难发现错误原因。同时输入“\backslash 命令”时需注意，若命令结束后紧跟正文内容，需要在结尾加入空格，即\verb|a \quad b|。
+为了在后续的光追与降噪阶段提供充足的物理信息，同时兼顾 GPU 显存带宽的限制，本系统精心设计了 G-Buffer 的纹理格式与布局结构：
 
-发现Error报错后，请对刚才添加的内容进行错误排查，重点观察报错位置附近的特殊符号、插入图片的路径、代码 \} 大括号是否完整。若无法判断错误位置，可以将添加部分临时删除，一点一点的加入并编译，直至出现Error报错，缩小错误代码的位置。
+\begin{enumerate}
+    \item \textbf{反照率与粗糙度缓冲（Albedo \& Roughness）}：采用 \texttt{VK\_FORMAT\_R8G8B8A8\_UNORM} 格式。RGB 通道存储 PBR 材质的基础颜色（Base Color），A 通道压缩存储材质的粗糙度（Roughness）属性。
+    
+    \item \textbf{世界空间法线与金属度缓冲（Normal \& Metallic）}：采用 \texttt{VK\_FORMAT\_R16G16B16A16\_SFLOAT} 半精度浮点格式。由于光线追踪对法线的精度要求极高（法线量化误差会导致严重的反射伪影），RGB 通道直接存储未压缩的 $[-1, 1]$ 世界空间法线向量，A 通道存储金属度（Metallic）。
+    
+    \item \textbf{深度缓冲（Depth）}：采用 \texttt{VK\_FORMAT\_D32\_SFLOAT} 单精度浮点格式，用于在后续阶段利用逆视图投影矩阵精确重建世界空间坐标。
+    
+    \item \textbf{运动矢量缓冲（Motion Vector）}：采用 \texttt{VK\_FORMAT\_R16G16\_SFLOAT} 格式，存储当前帧像素相对于上一帧像素在屏幕空间的二维像素偏移量，是第五章 SVGF 降噪算法的核心前置数据。
+\end{enumerate}
 
-\subsection{空白符号}
+\subsection{世界坐标精确重建}
 
-\paragraph*{~\LaTeX~空白的原则：}
+在后续的计算着色器阶段，系统无需再次存储三维坐标点，而是直接通过采样深度缓冲来重建逐像素的世界坐标 $P_{world}$。其数学重建模型如下：
 
-\begin{itemize}
-    \item 空行分段，多个空行等同为1个
-    \item 段落首行缩进是自动的，绝对不能使用空格代替
-    \item 英文中多个空格处理为1个空格，中文中空格将被忽略
-    \item 汉字与其他字符的间距会自动有XeLaTeX处理
-    \item 禁止使用中文全角空格
-\end{itemize}
+设屏幕空间像素坐标为 $(u, v)$，采样深度值为 $z$，首先将其映射至标准化设备坐标系（NDC），再乘以视图投影逆矩阵 $M_{inv\_vp}$ 进行逆变换：
 
-\paragraph*{空格的输入方法：}
-
-\begin{itemize}
-    \item 当前字体的一个宽度，即1em\\
-    \verb|a \quad b| \quad a \quad b
-    \item 2em空格\\
-    \verb|a \qquad b| \quad a \qquad b
-    \item 1/6em空格\\
-    \verb|a \, b| \qquad \qquad  a\,b \\
-    \verb|a \thinspace b| a \thinspace b
-    \item 0.5em空格\\
-    \verb|a \enspace b| \quad a \enspace b
-    \item 空格\\
-    \verb|a \ b| \quad a \ b
-    \item 硬空格（不能分割\\
-    \verb|a~b| \quad a~b
-    \item 指定宽度的空白 (1pc=12pt=4.218mm)\\
-    \verb|a \kern 1pc b| \ \qquad a\kern 1pc b\\
-    \verb|a \kern -1em b| \qquad a\kern -1em b\\
-    \verb|a \hskip 1em b| \qquad a\hskip 1em b\\
-    \verb|a \hspace{35pt}b| \quad a\hspace{35pt}b
-    \item 占位宽度 xyz的占位宽度\\
-    \verb|a \hphantom{xyz}b| \quad a\hphantom{xyz}b
-    \item 弹性宽度，占满横向空间\\
-    \verb|a \hfill b| \quad a\hfill b
-\end{itemize}
- 
-\subsection{文本控制}
-
-\begin{itemize}
-    \item 分段(有段首缩进) \\
-    \verb|para1|\\ \hspace*{\fill} \\\verb|para2|
-
-    para1
-
-    para2
-
-    \item 文字之间直接换行(无缩进)\\
-    \verb|para1\\line2|
-
-    para1\\line2
-
-    \item 添加空白行(会出现Warning) \\
-    \verb|line1 \\ ~\\ line2| \\
-    line1 \\ ~\\ line2
-
-    \item 这个命令也可以加空行(无Warning)，一般用在文字之间加空行 \\
-    \verb|line1 \\ \hspace*{\fill} \\ line2| \\
-    line1\\ \hspace*{\fill} \\line2
-
-    \item 控制空行高度 \\
-    \verb|line1 \\ \vspace{5ex} \\ line2| \\
-    line1 \\ \vspace{5ex} \\ line2
-
-    \item 换页(新页包含段首缩进) \\
-    \verb|line1 \newpage para2| \\
-    line1 \newpage para2
-\end{itemize}
-
- \subsection{\LaTeX 控制符}
- \begin{itemize}
-    \item \verb|\#| \qquad \#
-    \item \verb|\$| \qquad \$
-    \item \verb|\%| \qquad \%
-    \item \verb|\{| \qquad \{
-    \item \verb|\}| \qquad \}
-    \item \verb|\&| \qquad \&
-    \item \verb|\~{}| \quad \~{}
-    \item \verb|\_{}| \quad \_{}
-    \item \verb|\^{}| \quad \^{}
-    \item \verb|\textbackslash| \qquad \textbackslash
- \end{itemize}
-
- \subsection{排版符号}
- \S \P \dag \ddag \copyright \pounds
-
- \subsection{\TeX 标志符号}
- \LaTeX \TeX{}  \LaTeXe{}
-
- \subsection{引号}
-
- \paragraph*{半角输入模式：}
-
- \begin{itemize}
-    \item \verb|`| \ \quad 左单引号：`        %(键盘第二行第一个)  
-    \item \verb|'|  \ \quad 右单引号：' 
-    \item \verb|``| \quad 左双引号：`` 
-    \item \verb|''| \quad 右双引号：'' 
- \end{itemize}
-
- \paragraph*{全角输入模式：}
-
-\begin{itemize}
-    \item  ‘  \ \quad 左单引号：‘ 
-    \item  ’  \ \quad 右单引号：’ 
-    \item  \verb|“| \ \quad 左双引号：“ 
-    \item  \verb|”| \ \quad 右双引号：” 
-\end{itemize}
-
- \subsection{连字符}
-
-\begin{itemize}
-    \item \verb|-| \ \ \ \quad -
-    \item \verb|--| \ \ \quad --
-    \item \verb|---| \quad ---
-\end{itemize}
-
-\section{各节一级标题 section}
-
-\textbf{注意：命令不带*会显示编号，带*则不进行编号}
-
-\subsection{各节二级标题 subsection}
-你是内容
-
-\subsection*{无编号二级标题 subsection*}
-content
-
-\subsubsection{各节三级标题 subsubsection}
-他是内容
-
-\paragraph{四级标题 paragraph}
-内容内容
-
-\subparagraph{五级标题 subparagraph}
-内容内容
-
-\section{字体样式}
-
-\subsection{字体调节}
-
-\begin{tabular}{ll}
-	\verb|\songti|   & {\songti 宋体}   \\
-	\verb|\heiti|    & {\heiti 黑体}    \\
-	\verb|\fangsong| & {\fangsong 仿宋} \\
-	\verb|\kaishu|   & {\kaishu 楷书}
-\end{tabular}
-
-
-\subsection{字号调节}
-字号命令: \verb|\zihao| \index{zihao}
-
-\begin{tabular}{ll}
-\verb|\zihao{0}| &\zihao{0}  初号字 English \\
-\verb|\zihao{-0}|&\zihao{-0} 小初号 English \\
-\verb|\zihao{1} |&\zihao{1}  一号字 English \\
-\verb|\zihao{-1}|&\zihao{-1} 小一号 English \\
-\verb|\zihao{2} |&\zihao{2}  二号字 English \\
-\verb|\zihao{-2}|&\zihao{-2} 小二号 English \\
-\verb|\zihao{3} |&\zihao{3}  三号字 English \\
-\verb|\zihao{-3}|&\zihao{-3} 小三号 English \\
-\verb|\zihao{4} |&\zihao{4}  四号字 English \\
-\verb|\zihao{-4}|&\zihao{-4} 小四号 English \\
-\verb|\zihao{5} |&\zihao{5}  五号字 English \\
-\verb|\zihao{-5}|&\zihao{-5} 小五号 English \\
-\verb|\zihao{6} |&\zihao{6}  六号字 English \\
-\verb|\zihao{-6}|&\zihao{-6} 小六号 English \\
-\verb|\zihao{7} |&\zihao{7}  七号字 English \\
-\verb|\zihao{8} |&\zihao{8}  八号字 English \\
-\end{tabular}
-
-\subsection{字体样式}
-
-注意：部分字体不支持会出现Warning警告，请根据实际情况进行使用。
-
-宋体\quad \textbf{粗体}\quad \textit{斜体}\quad \textbf{\textit{粗斜体}}。
-
-{\heiti 黑体\quad \textbf{粗体}\quad \textit{斜体}\quad \textbf{\textit{粗斜体}}}。
-
-{\fangsong 仿宋\quad \textbf{粗体}\quad \textit{斜体}\quad \textbf{\textit{粗斜体}}}。
-
-{\kaishu 楷书\quad \textbf{粗体}\quad \textit{斜体}\quad \textbf{\textit{粗斜体}}}。
-
-Serif\quad \textit{Italic}\quad \textbf{Bold}\quad \textbf{\textit{BoldItalic}}
-
-{\sffamily Sans\quad \textit{Italic}\quad \textbf{Bold}\quad \textbf{\textit{BoldItalic}}}
-
-{\ttfamily Mono\quad \textit{Italic}\quad \textbf{Bold}\quad \textbf{\textit{BoldItalic}}}
-
-
-\section{常用命令}
-
-\begin{description}
-  \item[cite]  参考文献引用, 得到形如 [3-7] 的样式。
-  \item[color,xcolor]  支持彩色。
-  \item[enumerate]  方便自由选择 enumerate 环境的编号方式。\\
-  \textbf{详细说明请见\ref{sec:list}节。} \\
-  比如
-
-  \verb|\begin{enumerate}[(a)]| 得到形如 (a), (b), (c) 的编号。
-
-
-  \verb|\begin{enumerate}[i)]| 得到形如 i), ii), iii) 的编号。
-
-  \verb|\begin{enumerate}[\hspace{1cm}(1)]| \verb|\hspace|命令用于调整距离。
-
-\end{description}
-
-另外要说明的是, itemize, enumerate, description 这三种 list 环境，已经调节了其间距和缩进，
-以符合中文书写的习惯。
-
-
-\section{引用}
-
-\textbf{详细说明请见\ref{cha:ref}节。}
-
-参考文献的引用, 用命令~\verb|\cite{ }|。大括号内要填入的字串, 是自命名的文献条目名。参考文献建议使用文献管理工具进行管理，将所需文献导出bib格式，放于ref目录下，并在main.tex中引入。论文最后的参考文献会根据bib文件与实际cite的项目自动生成。
-
-比如, 通常我们会说:
-
- {\kaishu
-关于此问题, 请参见文献 \cite{oclc2000about}. 作者某某还提到了某某概念\upcite{xiaoyu2001chubanye}.}
-
-
-上文使用的源文件为:
-
- {\kaishu
-关于此问题, 请参见文献~\verb|\cite{oclc2000about}|. 作者某某还提到了某某概念~\verb|\upcite{xiaoyu2001chubanye}|.
-}
-
-其中~\verb|\upcite| 是自定义命令, 使文献引用呈现为\CJKunderdot{上标形式}.
-
-({\heiti 注意:} {\kaishu 这里文献的引用, 有时需要以上标形式出现, 有时需要作为正文文字出现, 为什么?})
-
-另外, 要得到形如~\cite{r1,r3,r4,r5} 的参考文献连续引用, 需要用到 cite 宏包(模板已经加入),
-在正文中使用~\verb|\cite{r1,r3,r4,r5}| 的引用形式即可.
-或者, 连续引用的上标形式: 使用~\verb|\upcite{r1,r2,r3}|, 得到\upcite{r1,r2,r3}。
-
-若使用VSCode，修改了参考文献后一定要重新编译bib后再使用xe编译，否则cite部分会出现?，找不到引用的参考文献，同时最后参考文献部分也不会显示该引用。
-
-\section{公式}
-
-\textbf{详细说明请见\ref{sec:equation}节。}
-
-公式书写可使用在线编辑器选择合适的命令：\url{https://www.latexlive.com/}
-
-行内公式可使用\verb|$x=x^2$|，即$x=x^2$。
-
-行间公式可使用equation环境，此时一般不建议空一行，会让公式产生缩进不居中。
 \begin{equation}
-x = 1.
+P_{ndc} = (u \times 2.0 - 1.0, v \times 2.0 - 1.0, z)
 \end{equation}
 
-\section{图形与表格}
+\begin{equation}
+P_{world} = M_{inv\_vp} \times \begin{bmatrix} P_{ndc} \\ 1.0 \end{bmatrix}
+\end{equation}
 
-\subsection{图形}
+随后进行透视除法，即可精确获得供光线追踪发射起点的三维坐标。
 
-\textbf{详细说明请见\ref{sec:figure}节。}
+\section{基于 Ray Query 的精确软硬阴影实现}
 
-支持对~eps, pdf, jpg 等等常见图形格式。
+阴影是构建场景空间深度感知的重要物理现象。传统光栅化采用的阴影贴图（Shadow Map）受限于分辨率，极易产生锯齿（Aliasing）与漏光（Peter Panning）。本系统在计算直接光遮蔽率时，引入了 Vulkan 的 \texttt{VK\_KHR\_ray\_query} 扩展。
 
-再次\colorbox{red!45}{澄清一个误会}: \LaTeX{} 支持的图形格式绝非 eps 这一种。 无需特意把图片转化为 eps。
+\subsection{内联射线求交（Inline Ray Tracing）}
 
-写实验报告时，像素图可直接使用jpg、png等常见格式，矢量图建议转换为pdf并进行适当裁剪后再插入。攥写学术论文时请根据具体刊物的要求插入相应图片。
+Ray Query 允许在极轻量级的计算着色器（Compute Shader）中直接发起射线求交，无需建立复杂的着色器绑定表（SBT）。对于场景中的任意点 $P$，系统沿光照方向 $L$ 向光源发射一条可见性测试射线（Visibility Ray）。
 
-用形如~\verb|\includegraphics[width=12cm]{Daisy.jpg}| 的命令可以纳入图片。
+当射线穿越顶层加速结构（TLAS）时，通过调用 \texttt{rayQueryProceedEXT} 指令遍历 BVH 树。如果返回 \texttt{VK\_RAY\_QUERY\_INTERSECTION\_TYPE\_TRIANGLE\_EXT}，即判定射线被几何体阻挡，该像素处于本影区（Umbra），直接光照贡献归零。
 
-如图~\ref{fig:1} 是一个纳入~jpg 图片的例子，\verb|[htb]|控制其位置，需要强制将图片放于代码所代表的位置时可以使用\verb|[H]|。
+\subsection{阴影粉刺（Shadow Acne）消除算法}
 
-\begin{figure}[H]
-\centering
-  \includegraphics[width=\textwidth]{Daisy.jpg}
-  \caption{一个彩色 jpg 图片的例子}
-  \label{fig:1}
-\end{figure}
+由于浮点数精度限制，重建的坐标点 $P$ 往往会轻微陷入几何表面内部，导致射线在发射瞬间与自身几何体发生错误自交，产生大面积的黑色条纹伪影（Shadow Acne）。
 
-\subsection{表格}
+本系统采用基于偏导数（Derivative）的自适应偏移算法：根据 G-Buffer 中深度的屏幕空间梯度动态计算斜率偏移，确保射线起点被安全推离几何表面。发射点 $P_{safe}$ 修正公式为：
 
-\textbf{详细说明请见\ref{sec:table}节。}
+\begin{equation}
+P_{safe} = P_{world} + \mathbf{N} \times \epsilon_{bias}
+\end{equation}
 
-表格问题, 建议使用“三线表”, 如表 \ref{tab:1}。
+其中 $\mathbf{N}$ 为表面法线，$\epsilon_{bias}$ 为根据深度偏导数动态计算的极小值。
 
-\begin{table}[htb]
-\centering
-\caption{一般三线表}
-\label{tab:1}
-    \begin{tabular}{c c c c c c c c c c c}
-    \hline
-    123 & 4  & 5  & 123 & 4 & 5123 & 4 & 5 & 123 & 4 & 5\\
-    \hline
-    67 & 890 & 13 & 123 & 4 & 5123 & 4 & 5 & 123 & 4 & 5\\
-    67 & 890 & 13 & 123 & 4 & 5123 & 4 & 5 & 123 & 4 & 5\\
-    67 & 890 & 13 & 123 & 4 & 5123 & 4 & 5 & 123 & 4 & 5\\
-    \hline
-    \end{tabular}
-\end{table}
+\section{基于 RT Pipeline 的镜面反射与光照计算}
+
+处理复杂的多次镜面反射（Specular Reflection）与材质光照，是混合管线最具挑战性的环节。由于反射射线方向高度发散，系统利用了 Vulkan 完整的 \texttt{VK\_KHR\_ray\_tracing\_pipeline} 机制。
+
+\subsection{反射射线生成与 SBT 调度}
+
+在光线生成着色器（RayGen Shader）中，系统读取 G-Buffer 提取的法线 $\mathbf{N}$ 与观察方向 $\mathbf{V}$（即摄像机指向表面的向量），计算出镜面反射方向 $\mathbf{R}$：
+
+\begin{equation}
+\mathbf{R} = \mathbf{V} - 2(\mathbf{N} \cdot \mathbf{V})\mathbf{N}
+\end{equation}
+
+针对表面粗糙度大于一定阈值（如 Roughness $> 0.8$）的纯漫反射像素，系统执行提前剔除（Early Culling），不发射射线，以节省宝贵的硬件算力。对于有效像素，利用 \texttt{traceRayEXT} 函数发射射线，并将当前反弹次数等状态封装于载荷（Payload）结构体中进行传递。
+
+\subsection{命中着色器（Closest Hit）中的 PBR 求解}
+
+当射线命中反射物体表面时，硬件自动触发最近命中着色器（Closest Hit Shader）。系统在此阶段提取相交三角形的重心坐标（Barycentric Coordinates），插值计算出命中点的纹理坐标与法线，并对其进行直接光照采样。
+
+最终通过 Cook-Torrance BRDF 模型，计算命中点的辐射亮度 $L_i$，并将其乘以上下文载荷中的衰减系数（Attenuation）带回主程序，完成了基于物理的镜面反射颜色求解。
+
+\section{光照信号合成（Composition）策略}
+
+在上述光追阶段完成并经过第五章的 SVGF 降噪处理后，系统将获取平滑的反射/阴影光照信号。在最终的合成通道（Composition Pass）中，系统需要将纯光照信号与材质的基础属性重新结合。
+
+系统读取 G-Buffer 中的基础颜色（Albedo），并结合 PBR 金属工作流进行调制（Modulation）。最终输出像素的颜色 $C_{final}$ 由直接光照 $C_{direct}$ 与环境反射 $C_{reflection}$ 累加构成。由于所有光照计算均在线性颜色空间（Linear Space）以及高动态范围（HDR）下进行，系统在输出到屏幕前，必须经过 ACES 色调映射（Tone Mapping）算法，将 HDR 数值平滑压缩至 $[0, 1]$ 的 LDR 区间，并进行标准的 Gamma 2.2 校正，以匹配显示器的输出特性，呈现真实的视觉效果。
+
+\section{本章小结}
+
+本章系统性地剖析了混合渲染引擎的核心管线实现。通过解耦几何处理与光照计算，系统利用光栅化高效构建了包含深度、法线及运动矢量的高精度 G-Buffer. 在物理光照求解层面，创新性地结合了两种硬件加速特性：利用轻量级的 Ray Query 实现了精准无伪影的直接光软硬阴影；利用全特性的 RT Pipeline 攻克了多重反弹的 PBR 镜面反射难题。通过合理的 HDR 光照合成与色调映射策略，该管线成功地将离线级的光追画质引入实时帧率预算中。然而，受限于 1 SPP 的极低采样率，当前的光追信号仍伴随强烈的蒙特卡洛噪声，后续第五章将详细论述如何通过时空降噪算法彻底解决这一视觉缺陷。
