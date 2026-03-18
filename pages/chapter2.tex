@@ -46,32 +46,6 @@ f_{specular} = \frac{D(h) F(v, h) G(l, v, h)}{4 (n \cdot l)(n \cdot v)}
     \item \textbf{几何遮蔽函数 G (Geometry Function)}：采用 Smith 联合遮蔽阴影函数，用于模拟微面元之间相互遮挡（Shadowing）与遮蔽（Masking）导致的能量流失。
 \end{itemize}
 
-为了在基于物理的渲染器中精确计算微面元的反射贡献，本系统对法线分布函数 $D$、菲涅尔方程 $F$ 以及几何遮蔽函数 $G$ 采用了业界广泛认可的近似求解方案。
-
-\textbf{1. 法线分布函数（Normal Distribution Function, NDF）} \\
-本系统采用 Trowbridge-Reitz GGX 分布。该函数通过材质的粗糙度参数 $\alpha$（通常设为表面粗糙度值的平方，即 $\alpha = Roughness^2$）来控制高光的拖尾（Tail）表现。其数学表达式为：
-\begin{equation}
-D_{GGX}(n, h, \alpha) = \frac{\alpha^2}{\pi \left( (n \cdot h)^2 (\alpha^2 - 1) + 1 \right)^2}
-\end{equation}
-其中，$n$ 为宏观表面法线，$h$ 为视线方向 $v$ 与光线入射方向 $l$ 的半程向量（Half-vector）。当粗糙度 $\alpha$ 极小时，法线高度集中于宏观法线方向，形成锐利的镜面高光；反之，高光则会被均匀地散射至周围区域。
-
-\textbf{2. 菲涅尔方程（Fresnel Equation）} \\
-菲涅尔效应描述了观察角度越接近掠射角（Grazing Angle），表面反射率越高的物理现象。为了避免复杂的复折射率计算，本系统采用 Schlick 近似公式：
-\begin{equation}
-F_{Schlick}(h, v, F_0) = F_0 + (1 - F_0)(1 - (h \cdot v))^5
-\end{equation}
-其中，$F_0$ 表示基础反射率（即垂直光线入射时的反射率）。对于绝缘体（非金属），$F_0$ 通常取近似常量（如 $0.04$）；对于金属导体，$F_0$ 则由材质的基础颜色（Albedo）决定。
-
-\textbf{3. 几何遮蔽函数（Geometry Function）} \\
-微观表面的凹凸不平会导致光线在射入（Shadowing）与反射（Masking）时被自身微几何体遮挡。本系统采用与 GGX 分布相匹配的 Smith 联合几何函数，它由视线方向的遮蔽 $G_1(n, v)$ 与光线方向的遮挡 $G_1(n, l)$ 共同决定：
-\begin{equation}
-G_{Smith}(n, v, l, k) = G_1(n, v, k) G_1(n, l, k)
-\end{equation}
-其中局部遮蔽函数 $G_1$ 采用 Schlick-GGX 近似：
-\begin{equation}
-G_1(n, x, k) = \frac{n \cdot x}{(n \cdot x)(1 - k) + k}
-\end{equation}
-针对直接光照（如解析光源），粗糙度重映射参数 $k$ 的定义为 $k = \frac{(Roughness + 1)^2}{8}$；而在基于图像的照明（IBL）中，$k$ 被定义为 $k = \frac{Roughness^2}{2}$。
 % [此处插入图2-1：微面元光照反射与几何遮蔽示意图]
 % \begin{figure}[htb]
 %   \centering

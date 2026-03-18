@@ -39,12 +39,8 @@
 \end{itemize}
 通过这种声明式 API，Render Graph 能够在 CPU 端静态捕获所有节点间的数据依赖，进而构建出完整的有向无环图。
 
-\subsection{跨帧资源与乒乓轮换机制（Ping-Pong Mechanism）}
-在时域抗锯齿（TAA）与时空降噪（SVGF）算法中，当前帧的计算强依赖于上一帧的输出结果（历史缓冲）。这种跨越单帧生命周期的资源流转打破了传统 Render Graph 仅限单帧分析的局限。
-为了解决 Compute Shader 同时对同一物理资源进行读写的“资源别名（Resource Aliasing）”数据冒险（Data Hazard），本系统在架构中引入了乒乓轮换机制。系统为历史数据分配两张物理隔离的长期存活贴图（Persistent Images）。在图构建时，利用当前帧索引的奇偶性（\texttt{FrameIndex \% 2}）动态切换绑定的资源视图：在偶数帧读取贴图 A 并写入贴图 B，奇数帧则反之。结合渲染图底层的 \texttt{vkCmdCopyImage} 物理硬拷贝逻辑，彻底杜绝了时域算法中常见的画面横跳与闪烁伪影。
-
 \section{资源状态与显存屏障（Barrier）的自动推导}
-Vulkan 规范要求，当同一个资源在不同管线阶段（Pipeline Stages）被连续访问，且至少有一次是写操作时，必须插入显式的管线屏障（VkImageMemoryBarrier2 或 VkBufferMemoryBarrier2）。本系统 Render Graph 的最大技术贡献，在于实现了屏障的自动推导引擎。
+Vulkan 规范要求，当同一个资源在不同管线阶段（Pipeline Stages）被连续访问，且至少有一次是写操作时，必须插入显式的管线屏障（VkImageMemoryBarrier 或 VkBufferMemoryBarrier）。本系统 Render Graph 的最大技术贡献，在于实现了屏障的自动推导引擎。
 
 \subsection{拓扑排序与执行剔除}
 在图编译阶段，系统首先利用深度优先搜索（DFS）算法对构建好的有向无环图进行拓扑排序（Topological Sort），确定所有渲染通道的线性执行序列。同时，如果某个 Pass 产生的输出资源最终没有被终端节点（如交换链输出）所依赖，系统会将其视为冗余计算（Dead Code）并将其从执行队列中剔除，从而实现极致的性能优化。
@@ -54,9 +50,8 @@ Vulkan 规范要求，当同一个资源在不同管线阶段（Pipeline Stages�
 
 当相邻的通道 Pass\_A 与 Pass\_B 对同一个图像资源 R 产生依赖时，系统通过查表机制自动推导屏障参数：
 \begin{enumerate}
-    \item \textbf{读写同步（Execution Dependency）}：系统自动推导 \texttt{srcStageMask} 与 \texttt{dstStageMask}，例如强制 GPU 在执行 Pass\_B 的 Compute Shader 读取前，必须等待 Pass\_A 的 Color Attachment 写入操作彻底刷新至显存缓存（Flush to VRAM），从根本上避免了经典的数据撕裂与读取过期（Stale Data）问题。
-    \item \textbf{常规状态转换（Layout Transition）}：假设 Pass\_A 是 G-Buffer 生成阶段，其将 R 作为颜色附件写入，此时 R 处于 \texttt{COLOR\_ATTACHMENT\_OPTIMAL} 状态；Pass\_B 为光线追踪阶段，需将 R 作为纹理进行采样。系统会自动生成屏障，将其安全地转换为 \texttt{SHADER\_READ\_ONLY\_OPTIMAL}。针对 Compute Shader 的读写需求，则自动转换为通用的 \texttt{GENERAL} 布局。
-    \item \textbf{深度缓冲状态推导（Depth-only Constraints）}：Vulkan 规范严格禁止纯深度格式（如 \texttt{D32\_SFLOAT}）转换为 \texttt{GENERAL} 布局。针对此时空降噪网络中频繁使用的历史深度缓冲（History Depth），本系统架构引入了特殊的 \texttt{isDepth} 标志位路由。在屏障自动生成时，若检测到该资源为深度图，则绕过默认的 \texttt{GENERAL} 转换策略，将其强制约束在 \texttt{DEPTH\_STENCIL\_READ\_ONLY\_OPTIMAL} 或 \texttt{SHADER\_READ\_ONLY\_OPTIMAL} 状态，从而满足了 Vulkan Validation Layer 极其严苛的状态校验要求。
+    \item \textbf{状态转换（Layout Transition）}：假设 Pass\_A 是 G-Buffer 生成阶段，其将 R 作为颜色附件写入，此时 R 处于 VK\_IMAGE\_LAYOUT\_COLOR\_ATTACHMENT\_OPTIMAL 状态；Pass\_B 为光线追踪阶段，需将 R 作为纹理进行采样。系统会自动生成屏障，将其布局安全地转换为 VK\_IMAGE\_LAYOUT\_SHADER\_READ\_ONLY\_OPTIMAL。
+    \item \textbf{读写同步（Execution Dependency）}：系统自动设置 srcStageMask 为颜色附件输出阶段，dstStageMask 为计算着色器阶段，强制 GPU 在执行 Pass\_B 的纹理读取前，必须等待 Pass\_A 的像素写入操作彻底刷新至显存（Flush to VRAM），从根本上避免了经典的渲染撕裂与数据过期（Stale Data）问题。
 \end{enumerate}
 
 % [此处插入图3-2：资源状态自动推导与屏障插入机制原理图]
@@ -68,4 +63,4 @@ Vulkan 规范要求，当同一个资源在不同管线阶段（Pipeline Stages�
 % \end{figure}
 
 \section{本章小结}
-本章详细阐述了基于 Render Graph 的渲染引擎架构设计。针对 Vulkan 显式状态管理的复杂性，本系统摒弃了传统的硬编码调度模式，设计了包含虚拟资源句柄与有向无环图分析的自动化管线系统。通过拓扑排序、资源状态跟踪机制以及针对时域算法定制的跨帧乒乓轮换结构，系统成功实现了管线依赖关系的自动解耦、冗余阶段的动态剔除以及复杂显存屏障（尤其是深度缓冲的非法布局约束）的安全推导。该架构不仅彻底解决了混合渲染管线中多阶段穿插执行的同步难题，更为后续各种复杂光照算法与降噪网络的高效集成提供了一个强健、现代化的底层底座。
+本章详细阐述了基于 Render Graph 的渲染引擎架构设计。针对 Vulkan 显式状态管理的复杂性，本系统摒弃了传统的硬编码调度模式，设计了包含虚拟资源句柄与有向无环图分析的自动化管线系统。通过拓扑排序与资源状态跟踪机制，系统成功实现了管线依赖关系的自动解耦、冗余阶段的动态剔除以及显存屏障的安全推导。该架构不仅彻底解决了混合渲染管线中多阶段（光栅化、光线追踪、计算着色器）穿插执行的同步难题，更为第四章各种光照算法的高效实现与快速迭代提供了一个强健、现代化的系统底层底座。
