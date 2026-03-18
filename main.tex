@@ -1,6 +1,7 @@
 % !Mode:: "TeX:UTF-8"
 %% 请使用 XeLaTeX 编译本文.
 \documentclass[forprint, AutoFakeBold, AutoFakeSlant ]{WHUExperiment}
+\usepackage{float}
 %---------------------这里添加所需的命令--------------------------------
 \lstdefinelanguage{json}{ % 定义json代码高亮
     morestring=[d]",
@@ -23,6 +24,51 @@
       {\}}{{{\color{BlueGreen}{\}}}}}{1}
       {[}{{{\color{BlueGreen}{[}}}}{1}
       {]}{{{\color{BlueGreen}{]}}}}{1},
+}
+
+% 引入代码高亮所需的宏包
+\usepackage{listings}
+\usepackage{xcolor}
+
+% 定义代码高亮颜色 (学术论文经典的护眼打印风格)
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.96,0.96,0.96}
+
+% 1. 定义 C++ 样式 (供之前第三章使用)
+\lstdefinestyle{CppStyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen}\itshape,
+    keywordstyle=\color{blue}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\small,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=4,
+    language=C++
+}
+
+% 2. 专门为 GLSL Shader 补充的关键字库
+\lstdefinelanguage{GLSL}{
+    morekeywords={vec2, vec3, vec4, mat4, uniform, layout, in, out, void, main, texture, clamp, pow, normalize, max, min, imageStore, texelFetch, exp, sqrt, dot},
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    morestring=[b]",
+}
+
+% 3. 定义 GLSL 样式 (供第五章的 atrous.comp 使用)
+\lstdefinestyle{GLSLStyle}{
+    style=CppStyle,
+    language=GLSL
 }
 
 %--------------------------------------------------------------------------
@@ -82,14 +128,14 @@
 
 %此处结束正文-------------------------------------------------------------------------------------------------
 
+%%%=== 致谢 ========%%%
+\include{pages/acknowledgement}
+
 %%%=== 参考文献 ========%%%
 \cleardoublepage\phantomsection
 
 \bibliographystyle{gbt7714-numerical}        % 参考文献样式
 \bibliography{ref/refs.bib}
-
-%%%=== 致谢 ========%%%
-\include{pages/acknowledgement}
 
 %%%-------------- 附录. 不需要可以删除.-----------
 \cleardoublepage

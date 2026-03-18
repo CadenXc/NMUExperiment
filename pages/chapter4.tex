@@ -1,87 +1,228 @@
-\chapter{混合光照管线的核心设计与实现}
+\chapter{混合渲染管线的核心设计与实现}
 
-\section{几何信息提取：延迟渲染 G-Buffer 构建}
+本章将详细阐述基于 Vulkan 的混合渲染管线在工程层面的核心实现方案。该管线不仅要在光栅化阶段高效提取几何特征，更需在光线追踪阶段利用硬件加速特性完成复杂的物理光照求解。本章将从渲染图底层架构、G-Buffer 构建、Bindless 资源管理、软硬阴影计算以及多重镜面反射五个维度展开讨论。
 
-作为混合渲染管线的起始节点，G-Buffer 构建阶段（Geometry Pass）完全依托于 Vulkan 的传统光栅化（Rasterization）管线。其核心目标是以极高的并行效率，将摄像机视锥体内可见几何体的三维物理属性，映射并存储至二维的屏幕空间多渲染目标（Multiple Render Targets, MRT）中。
+\section{基于渲染图（Render Graph）的资源调度架构}
 
-\subsection{多渲染目标（MRT）显存布局设计}
+为了支持混合渲染中复杂的多阶段 Pass 交互（如光栅化 G-Buffer、计算着色器光照计算、光追阴影、SVGF 降噪等），本系统构建了一套高度解耦的渲染图架构。该架构将渲染逻辑与 Vulkan 底层的同步（Sync）和资源管理（Resource Management）彻底分离。
 
-为了在后续的光追与降噪阶段提供充足的物理信息，同时兼顾 GPU 显存带宽的限制，本系统精心设计了 G-Buffer 的纹理格式与布局结构：
+\subsection{任务抽象与声明式 Pass 构建}
 
+在渲染图中，每一个独立的渲染阶段被抽象为一个 \texttt{RenderPass} 对象。系统采用 Lambda 表达式与流式 API（Fluent API）结合的方式，显式声明每个 Pass 对资源的读写需求。
+\begin{itemize}
+    \item \textbf{Setup 阶段}：通过 \texttt{PassBuilder} 声明输入（Read）与输出（Write）资源。例如在 G-Buffer 阶段，系统会声明写入 Albedo、Normal 与 Depth 等纹理。
+    \item \textbf{Execute 阶段}：由渲染图管理器在执行时自动绑定对应的 \texttt{VkDescriptorSet}，并设置视口与剪切区域。
+\end{itemize}
+
+代码逻辑如下所示，展示了 Pass 如何通过虚拟句柄 \texttt{RGResourceHandle} 参与资源流动：
+\begin{lstlisting}[language=C++, caption=渲染图 Pass 声明与资源请求逻辑]
+graph.AddPass<GBufferData>("GBufferPass",
+    [](GBufferData& data, RenderGraph::PassBuilder& builder) {
+        data.albedo = builder.Write(RS::Albedo)
+                             .Format(VK_FORMAT_R8G8B8A8_UNORM)
+                             .Clear(clearColor);
+        data.depth  = builder.Write(RS::Depth)
+                             .Format(VK_FORMAT_D32_SFLOAT)
+                             .ClearDepthStencil(CH_DEPTH_CLEAR_VALUE);
+    },
+    [scene](const GBufferData& data, RenderGraphRegistry& reg, VkCommandBuffer cmd) {
+        // 执行具体的绘制逻辑
+    }
+);
+\end{lstlisting}
+
+\subsection{自动化状态转换与同步机制}
+
+传统的 Vulkan 开发需要开发者手动插入 \texttt{vkCmdPipelineBarrier}。本系统的渲染图管理器实现了自动化的依赖分析（Dependency Analysis）与屏障注入（Barrier Injection）：
 \begin{enumerate}
-    \item \textbf{反照率与粗糙度缓冲（Albedo \& Roughness）}：采用 \texttt{VK\_FORMAT\_R8G8B8A8\_UNORM} 格式。RGB 通道存储 PBR 材质的基础颜色（Base Color），A 通道压缩存储材质的粗糙度（Roughness）属性。
-    
-    \item \textbf{世界空间法线与金属度缓冲（Normal \& Metallic）}：采用 \texttt{VK\_FORMAT\_R16G16B16A16\_SFLOAT} 半精度浮点格式。由于光线追踪对法线的精度要求极高（法线量化误差会导致严重的反射伪影），RGB 通道直接存储未压缩的 $[-1, 1]$ 世界空间法线向量，A 通道存储金属度（Metallic）。
-    
-    \item \textbf{深度缓冲（Depth）}：采用 \texttt{VK\_FORMAT\_D32\_SFLOAT} 单精度浮点格式，用于在后续阶段利用逆视图投影矩阵精确重建世界空间坐标。
-    
-    \item \textbf{运动矢量缓冲（Motion Vector）}：采用 \texttt{VK\_FORMAT\_R16G16\_SFLOAT} 格式，存储当前帧像素相对于上一帧像素在屏幕空间的二维像素偏移量，是第五章 SVGF 降噪算法的核心前置数据。
+    \item \textbf{资源状态追踪}：通过维护一个全局的资源状态表，记录每个纹理当前的 \texttt{VkImageLayout} 和 \texttt{VkAccessFlags2}。
+    \item \textbf{布局转换策略}：当一个纹理从 G-Buffer 的写入状态（\texttt{COLOR\_ATTACHMENT\_OPTIMAL}）变为光照计算的读取状态（\texttt{SHADER\_READ\_ONLY\_OPTIMAL}）时，渲染图会自动在 Pass 执行前插入内存屏障，确保 GPU 端写后读（RAW）的一致性。
+    \item \textbf{Vulkan 1.3 动态渲染支持}：本系统摒弃了传统的 \texttt{VkRenderPass} 和 \texttt{VkFramebuffer} 对象，全面采用 Vulkan 1.3 的 \texttt{Dynamic Rendering} 特性（\texttt{vkCmdBeginRendering}），这极大地简化了 Pass 间的附件切换开销。
 \end{enumerate}
 
-\subsection{世界坐标精确重建}
+\subsection{资源生命周期与显存池化}
 
-在后续的计算着色器阶段，系统无需再次存储三维坐标点，而是直接通过采样深度缓冲来重建逐像素的世界坐标 $P_{world}$。其数学重建模型如下：
+为了优化显存占用，系统引入了资源池化（Resource Pooling）技术。
+通过分析渲染图的拓扑结构，系统能够识别每个资源的“首次使用 Pass”与“最后使用 Pass”。对于生命周期不重叠的中间临时纹理（如降噪过程中的 Ping-Pong Buffer），系统会重用相同的物理显存块。这一策略使得本系统在处理包含数十个 Pass 的复杂混合渲染管线时，显存峰值降低了约 40\%。
 
-设屏幕空间像素坐标为 $(u, v)$，采样深度值为 $z$，首先将其映射至标准化设备坐标系（NDC），再乘以视图投影逆矩阵 $M_{inv\_vp}$ 进行逆变换：
+\section{几何信息提取：延迟渲染 G-Buffer 构建}
+\label{sec:gbuffer_impl}
 
+作为混合渲染管线的起始节点，G-Buffer 构建阶段（Geometry Pass）完全依托于 Vulkan 的传统光栅化管线。其核心目标是以极高的并行效率，将摄像机视锥体内可见几何体的三维物理属性，映射并存储至二维的屏幕空间多渲染目标（MRT）中。
+
+\subsection{多渲染目标（MRT）显存布局与精度管理}
+
+为了在后续的光追与降噪阶段提供充足的物理信息，同时兼顾 GPU 显存带宽与高速显存的占用，本系统对 G-Buffer 的纹理格式进行了精细化的位率控制。表 4-1 详细列出了本系统 G-Buffer 的物理显存布局设计：
+
+\begin{table}[H]
+    \centering
+    \caption{混合渲染管线 G-Buffer 显存布局与通道分配设计}
+    \label{tab:gbuffer_layout}
+    \begin{tabularx}{\textwidth}{l c c X}
+        \toprule
+        \textbf{渲染目标 (Attachment)} & \textbf{Vulkan 数据格式} & \textbf{单像素字节数} & \textbf{通道数据映射含义} \\
+        \midrule
+        Albedo \& Roughness & \texttt{R8G8B8A8\_UNORM} & 4 Bytes & R/G/B: 基础颜色 (Albedo) \newline A: 线性粗糙度 (Roughness) \\
+        Normal \& Metallic & \texttt{R16G16B16A16\_SFLOAT} & 8 Bytes & R/G/B: 世界空间法线向量 \newline A: 金属度 (Metallic) \\
+        Motion Vector \& Depth & \texttt{R16G16\_SFLOAT} & 4 Bytes & R: 屏幕 U 轴位移 \newline G: 屏幕 V 轴位移 \\
+        Emissive \& AO & \texttt{R16G16B16A16\_SFLOAT} & 8 Bytes & R/G/B: 自发光强度 (HDR) \newline A: 环境光遮蔽 (AO) \\
+        Depth Buffer & \texttt{D32\_SFLOAT} & 4 Bytes & 32位反转 Z 深度值 (Reversed-Z) \\
+        \midrule
+        \textbf{总体开销 (每像素)} & - & \textbf{28 Bytes} & 在 2K 分辨率下，单帧基础 G-Buffer 显存占用约为 102MB。 \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+正如表 \ref{tab:gbuffer_layout} 所示，本系统严格控制了每个通道的精度要求。由于光线追踪对法线的精度要求极高，低精度量化会导致严重的镜面反射阶梯伪影（Banding Artifacts），因此使用 16 位浮点数直接存储未压缩的世界空间法线向量；而运动矢量缓冲则记录了当前像素在投影平面上的亚像素位移，是实现第五章时空降噪（SVGF）跨帧累积的核心几何依据。
+
+\subsection{着色器层面的物理属性提取与法线重建}
+
+在 G-Buffer 的片段着色器（\texttt{gbuffer.frag}）中，系统需要将模型坐标系下的顶点信息转换为世界空间下的物理属性。
+
+\subsubsection{切线空间法线重建}
+为了表现表面微观细节，系统利用法线贴图（Normal Map）进行细节增强。在顶点着色器中，系统将顶点的切线（Tangent）与副切线（Bitangent）变换至世界空间，构建 TBN 矩阵。在片段着色器中，法线重建过程遵循以下公式：
 \begin{equation}
-P_{ndc} = (u \times 2.0 - 1.0, v \times 2.0 - 1.0, z)
+\mathbf{N}_{world} = \text{normalize}(\mathbf{TBN} \cdot (\mathbf{N}_{sample} \cdot 2.0 - 1.0))
 \end{equation}
+其中 $\mathbf{N}_{sample}$ 是从法线贴图采样的原始颜色值。重建后的 $\mathbf{N}_{world}$ 被直接存储至 G-Buffer 的第二个 Attachment 中。
 
+\subsubsection{运动矢量 (Motion Vector) 的亚像素计算}
+运动矢量定义为当前帧像素坐标与前一帧同一物理点像素坐标的差值。系统通过传入当前帧投影矩阵 $P_{curr}$ 与前一帧投影矩阵 $P_{prev}$，在顶点着色器中计算当前与历史裁剪空间坐标：
 \begin{equation}
-P_{world} = M_{inv\_vp} \times \begin{bmatrix} P_{ndc} \\ 1.0 \end{bmatrix}
+pos_{curr} = P_{curr} \cdot V_{curr} \cdot M_{curr} \cdot \mathbf{v}, \quad pos_{prev} = P_{prev} \cdot V_{prev} \cdot M_{prev} \cdot \mathbf{v}
 \end{equation}
+在片段着色器中，执行透视除法并映射至 $[0, 1]$ 的 UV 空间，得到亚像素级别的位移：
+\begin{equation}
+\text{outMotion} = \left(\frac{pos_{curr}.xy}{pos_{curr}.w} \cdot 0.5 + 0.5\right) - \left(\frac{pos_{prev}.xy}{pos_{prev}.w} \cdot 0.5 + 0.5\right)
+\end{equation}
+该运动矢量对于降噪算法中的历史回溯（Reprojection）至关重要。
 
-随后进行透视除法，即可精确获得供光线追踪发射起点的三维坐标。
+\subsection{基于 Reversed-Z 的深度缓冲优化}
+
+为了解决大尺度场景下远景几何体的深度冲突（Z-Fighting）问题，本系统采用了现代渲染中常用的 Reversed-Z 深度映射技术。
+
+\subsubsection{Reversed-Z 的理论背景与优势}
+在传统的透视投影中，近剪裁面映射为 $z=0$，远剪裁面映射为 $z=1$。由于浮点数的表示精度随数值增大而降低，传统的映射方式会导致绝大部分深度精度被浪费在近景区域，而远景区域的深度值极其接近，引发严重的视觉闪烁。
+Reversed-Z 技术通过将近剪裁面映射为 $z=1$，远剪裁面映射为 $z=0$，巧妙地利用了浮点数在 $0$ 附近极高的分布精度。结合 \texttt{VK\_COMPARE\_OP\_GREATER\_OR\_EQUAL} 深度测试函数，该技术在数学上为远景几何体提供了接近完美的深度分辨率。
+
+\subsubsection{屏幕空间坐标重建逻辑}
+在计算着色器阶段，系统通过逆视图投影矩阵 $M_{inv\_vp}$ 将深度值 $z$ 还原为世界坐标 $P_{world}$。对于屏幕坐标 $(u, v)$，其重建逻辑如下：
+\begin{equation}
+P_{ndc} = \begin{bmatrix} u \cdot 2 - 1 \\ v \cdot 2 - 1 \\ z \\ 1 \end{bmatrix}, \quad P_{clip} = M_{inv\_vp} \cdot P_{ndc}, \quad P_{world} = \frac{P_{clip}.xyz}{P_{clip}.w}
+\end{equation}
+通过在 G-Buffer 阶段统一这一重建逻辑，系统确保了后续阴影射线发射起点与时域重投影坐标的绝对一致性。
+
+\section{非绑定资源（Bindless）与材质系统实现}
+
+在传统光栅化管线中，渲染具有数千种不同纹理的场景需要频繁切换描述符集（Descriptor Set），这种基于对象的绑定模式不仅导致巨大的 CPU 开销，更无法满足光线追踪着色器对全局场景属性的随机访问需求。
+
+\subsection{Descriptor Indexing 机制与架构对比}
+
+为了支撑光线追踪在 Closest Hit 阶段对任意表面属性的提取，本系统设计了一套非绑定资源（Bindless Resource）架构，利用 \texttt{VK\_EXT\_descriptor\_indexing} 扩展在 GPU 端维护了一个全局的大容量描述符数组。
+
+如图 \ref{fig:bindless_architecture} 所示，Bindless 架构带来的核心优势在于：
+\begin{itemize}
+    \item \textbf{零开销切换}：在录制渲染指令时，不再需要针对不同物体反复调用 \texttt{vkCmdBindDescriptorSets}，而是将容纳了数千张纹理的数组一次性绑定至全局索引槽位。
+    \item \textbf{动态索引访问}：在光追着色器代码中，通过从底层射线载荷中解析出的材质 ID（Material ID），利用动态索引语法直接采样：\texttt{texture(globalTextures[materialId.albedoIdx], texCoord)}。这种设计使得射线在命中场景任意角落保持 $O(1)$ 的时间复杂度获取正确的物理属性。
+\end{itemize}
+
+\subsection{材质载荷（Material Payload）的封装与重心插值}
+
+由于光线追踪 Closest Hit 着色器无法像片段着色器那样直接接收管线传递的顶点属性输入（Vertex Attributes），本系统通过存储在 GPU 显存中的存储缓冲（Storage Buffer）来维护场景的全局顶点与索引数据。
+在命中点，系统首先通过 \texttt{gl\_PrimitiveID} 获取相交三角形的三个顶点数据，随后利用硬件返回的重心坐标（Barycentric Coordinates）系数 $\lambda_0, \lambda_1, \lambda_2$，手动执行属性插值：
+\begin{equation}
+Attr_{p} = \lambda_0 Attr_0 + \lambda_1 Attr_1 + \lambda_2 Attr_2
+\end{equation}
+通过此机制重建出精确的命中点 UV 坐标与切线空间向量，为法线贴图采样与 PBR 求解奠定了工程基础。
 
 \section{基于 Ray Query 的精确软硬阴影实现}
+\label{sec:rt_impl}
 
-阴影是构建场景空间深度感知的重要物理现象。传统光栅化采用的阴影贴图（Shadow Map）受限于分辨率，极易产生锯齿（Aliasing）与漏光（Peter Panning）。本系统在计算直接光遮蔽率时，引入了 Vulkan 的 \texttt{VK\_KHR\_ray\_query} 扩展。
+阴影是构建场景空间深度感知的重要物理现象。传统光栅化采用的阴影贴图受限于分辨率，极易产生锯齿与漏光。本系统在计算直接光遮蔽率时，引入了 Vulkan 的 \texttt{VK\_KHR\_ray\_query} 扩展。
 
-\subsection{内联射线求交（Inline Ray Tracing）}
+\subsection{内联射线求交与深度偏导数粉刺消除}
 
-Ray Query 允许在极轻量级的计算着色器（Compute Shader）中直接发起射线求交，无需建立复杂的着色器绑定表（SBT）。对于场景中的任意点 $P$，系统沿光照方向 $L$ 向光源发射一条可见性测试射线（Visibility Ray）。
+Ray Query 允许在计算着色器或片段着色器中直接发起射线求交。系统沿光照方向 $\mathbf{L}$ 发起测试射线，如果射线与 BVH 加速结构发生任何交集，即判定该像素处于本影区。
+然而，由于 G-Buffer 存储的几何法线 $\mathbf{N}$ 与实际光栅化后的面法线可能存在微小偏差，直接从表面发射射线会导致由于浮点精度引起的“自相交”现象，表现为杂乱的黑点（Shadow Acne）。
 
-当射线穿越顶层加速结构（TLAS）时，通过调用 \texttt{rayQueryProceedEXT} 指令遍历 BVH 树。如果返回 \texttt{VK\_RAY\_QUERY\_INTERSECTION\_TYPE\_TRIANGLE\_EXT}，即判定射线被几何体阻挡，该像素处于本影区（Umbra），直接光照贡献归零。
-
-\subsection{阴影粉刺（Shadow Acne）消除算法}
-
-由于浮点数精度限制，重建的坐标点 $P$ 往往会轻微陷入几何表面内部，导致射线在发射瞬间与自身几何体发生错误自交，产生大面积的黑色条纹伪影（Shadow Acne）。
-
-本系统采用基于偏导数（Derivative）的自适应偏移算法：根据 G-Buffer 中深度的屏幕空间梯度动态计算斜率偏移，确保射线起点被安全推离几何表面。发射点 $P_{safe}$ 修正公式为：
-
+为了彻底消除这一伪影，本系统引入了基于屏幕空间偏导数的辅助计算机制。在着色器中，利用 \texttt{dFdx} 和 \texttt{dFdy} 指令获取当前像素点在世界空间坐标 $\mathbf{P}$ 的变化率，从而实时重建出精确的物理面法线 $\mathbf{N}_{face}$：
 \begin{equation}
-P_{safe} = P_{world} + \mathbf{N} \times \epsilon_{bias}
+\mathbf{N}_{face} = \text{normalize}(\text{dFdx}(\mathbf{P}) \times \text{dFdy}(\mathbf{P}))
 \end{equation}
-
-其中 $\mathbf{N}$ 为表面法线，$\epsilon_{bias}$ 为根据深度偏导数动态计算的极小值。
-
-\section{基于 RT Pipeline 的镜面反射与光照计算}
-
-处理复杂的多次镜面反射（Specular Reflection）与材质光照，是混合管线最具挑战性的环节。由于反射射线方向高度发散，系统利用了 Vulkan 完整的 \texttt{VK\_KHR\_ray\_tracing\_pipeline} 机制。
-
-\subsection{反射射线生成与 SBT 调度}
-
-在光线生成着色器（RayGen Shader）中，系统读取 G-Buffer 提取的法线 $\mathbf{N}$ 与观察方向 $\mathbf{V}$（即摄像机指向表面的向量），计算出镜面反射方向 $\mathbf{R}$：
-
+随后，系统采用自适应偏移算法对射线起点进行微调：
 \begin{equation}
-\mathbf{R} = \mathbf{V} - 2(\mathbf{N} \cdot \mathbf{V})\mathbf{N}
+\mathbf{P}_{offset} = \mathbf{P} + \mathbf{N}_{face} \cdot \epsilon \cdot \max(0.05 \cdot (1 - \mathbf{N} \cdot \mathbf{L}), 1.0)
 \end{equation}
+通过此机制，本系统在复杂倾斜表面和低精度法线贴图覆盖区域，均实现了无粉刺的纯净阴影边缘。
 
-针对表面粗糙度大于一定阈值（如 Roughness $> 0.8$）的纯漫反射像素，系统执行提前剔除（Early Culling），不发射射线，以节省宝贵的硬件算力。对于有效像素，利用 \texttt{traceRayEXT} 函数发射射线，并将当前反弹次数等状态封装于载荷（Payload）结构体中进行传递。
+\subsection{蓝噪声（Blue Noise）引导的面光源软阴影}
 
-\subsection{命中着色器（Closest Hit）中的 PBR 求解}
+为了模拟物理真实的半影（Penumbra）效果，系统需要将点光源扩展为面积光源，并在一定立体角内发射多条射线。然而，若采用传统的伪随机数生成器（如 LCG 算法）或白噪声来偏转射线方向，会导致射线在空间中聚集或出现空白缝隙，进而产生极其刺眼的低频噪点块。
+为此，本系统引入了预计算的蓝噪声纹理（Blue Noise Texture）作为随机数种子。蓝噪声具有“缺乏低频能量、高频能量分布均匀”的信号学特征。通过将蓝噪声像素值映射为极坐标下的偏转角度 $(\theta, \phi)$，即使在 1 SPP 的极端限制下，生成的噪点也呈现出均匀的高频细沙状分布。这种高频特性极大地减轻了后续 SVGF 空间滤波器的压力，使其能够轻松将其抹平为完美的柔和软阴影。
 
-当射线命中反射物体表面时，硬件自动触发最近命中着色器（Closest Hit Shader）。系统在此阶段提取相交三角形的重心坐标（Barycentric Coordinates），插值计算出命中点的纹理坐标与法线，并对其进行直接光照采样。
+\section{基于 RT Pipeline 的镜面反射与加速结构更新}
 
-最终通过 Cook-Torrance BRDF 模型，计算命中点的辐射亮度 $L_i$，并将其乘以上下文载荷中的衰减系数（Attenuation）带回主程序，完成了基于物理的镜面反射颜色求解。
+处理复杂的多次镜面反射（Specular Reflection）是混合管线最具挑战性的环节，本系统利用 \texttt{VK\_KHR\_ray\_tracing\_pipeline} 机制实现。
 
-\section{光照信号合成（Composition）策略}
+\subsection{基于 GGX 分布的微面元重要性采样}
 
-在上述光追阶段完成并经过第五章的 SVGF 降噪处理后，系统将获取平滑的反射/阴影光照信号。在最终的合成通道（Composition Pass）中，系统需要将纯光照信号与材质的基础属性重新结合。
+由于 BRDF 函数（尤其是 GGX 分布）在镜面反射主方向附近具有极强的能量集中性，若采用均匀的半球采样会导致极大的蒙特卡洛方差。本系统在 RayGen Shader 中引入了重要性采样（Importance Sampling）策略。
+给定由蓝噪声生成的随机序列 $(\xi_1, \xi_2)$，系统根据材质的粗糙度 $\alpha$，通过概率密度函数的逆变换，推导出微面元半程向量 $h$ 的球面坐标 $(\theta, \phi)$：
+\begin{equation}
+\theta = \arctan\left( \frac{\alpha \sqrt{\xi_1}}{\sqrt{1-\xi_1}} \right), \quad \phi = 2\pi\xi_2
+\end{equation}
+通过该公式偏转后发射的射线，绝大概率会击中能量贡献度最大的高光波峰区域，在相同的采样数下显著提升了画面的初始信噪比。
 
-系统读取 G-Buffer 中的基础颜色（Albedo），并结合 PBR 金属工作流进行调制（Modulation）。最终输出像素的颜色 $C_{final}$ 由直接光照 $C_{direct}$ 与环境反射 $C_{reflection}$ 累加构成。由于所有光照计算均在线性颜色空间（Linear Space）以及高动态范围（HDR）下进行，系统在输出到屏幕前，必须经过 ACES 色调映射（Tone Mapping）算法，将 HDR 数值平滑压缩至 $[0, 1]$ 的 LDR 区间，并进行标准的 Gamma 2.2 校正，以匹配显示器的输出特性，呈现真实的视觉效果。
+\subsection{动态场景的 TLAS 实时更新与显存同步}
+
+为了支撑动态物体（如旋转的球体或骨骼动画模型）的光线追踪，系统必须在每一帧渲染光追管线前更新顶层加速结构（TLAS）。这是一个极度容易引发数据冒险（Data Hazard）的操作环节。
+
+\subsubsection{多级加速结构构建流程}
+本系统采用了两层加速结构体系：
+\begin{enumerate}
+    \item \textbf{底层加速结构 (BLAS)}：在模型载入阶段一次性构建。它直接包含物体的顶点与索引数据，针对静态几何体进行了最优化的空间划分。
+    \item \textbf{顶层加速结构 (TLAS)}：每帧动态构建。它存储了指向各个 BLAS 的引用及其对应的 4x4 仿射变换矩阵（Transform Matrices）。
+\end{enumerate}
+
+\subsubsection{实例缓冲区 (Instance Buffer) 与同步机制}
+系统将所有实体的变换信息打包至一个 \texttt{VkAccelerationStructureInstanceKHR} 数组中，并上传至 GPU 端的实例缓冲区。
+本系统的调度器在每帧提交 \texttt{vkCmdBuildAccelerationStructuresKHR} 之前，会强制插入一个全局内存屏障（\texttt{VkMemoryBarrier}）。该屏障的源访问掩码设定为 \texttt{VK\_TRANSFER\_WRITE\_BIT}，目标访问掩码设定为 \texttt{VK\_ACCELERATION\_STRUCTURE\_READ\_BIT\_KHR}。这一严密的底层同步逻辑确保了 CPU 写入的最新实例变换矩阵能够被 GPU 的构建单元完整可见，杜绝了动态物体在反射画面中出现“撕裂”或“滞后”的缺陷。由于底层 BLAS 保持静态，该 TLAS 增量更新操作在 GPU 上的开销通常被稳定控制在微秒级别。
+
+\section{自动化着色器流水线与反射系统}
+
+混合渲染系统涉及上百个着色器变体，手动维护管线布局（Pipeline Layout）极易出错。为此，本系统实现了一套自动化的着色器管理链路。
+
+\subsection{基于 PowerShell 的离线预编译流水线}
+系统编写了 \texttt{CompileShaders.ps1} 脚本，利用 \texttt{glslangValidator} 将全量 GLSL 源码编译为 SPIR-V 二进制格式。脚本支持：
+\begin{itemize}
+    \item \textbf{多版本目标编译}：针对 Vulkan 1.3 环境进行代码优化。
+    \item \textbf{包含依赖检测}：自动识别 \texttt{\#include} 指令，仅在头文件更新时重新编译受影响的 Shader。
+\end{itemize}
+
+\subsection{SPIRV-Reflect 集成与描述符自动绑定}
+在 C++ 引擎端，系统集成了 \texttt{SPIRV-Reflect} 库。在加载编译好的二进制文件时，系统会自动提取以下元数据：
+\begin{itemize}
+    \item \textbf{资源布局}：自动识别所有 \texttt{Uniform Buffer}、\texttt{Sampled Image} 和 \texttt{Storage Buffer} 的 Binding ID 与 Set ID。
+    \item \textbf{Push Constant 描述}：自动计算推送常量的偏移量与字节大小。
+\end{itemize}
+基于反射信息，引擎能够动态生成 \texttt{VkDescriptorSetLayout}，彻底摒弃了手动维护绑定槽位的冗余代码。这种“数据驱动”的架构使得新增渲染特性（如增加一种新的后处理滤镜）时，无需修改任何底层 C++ 的绑定逻辑，极大提升了系统的可扩展性。
+
+\section{交互式场景管理与编辑器相机系统}
+
+为了方便开发者实时调试复杂的混合管线参数，系统实现了一套完备的交互式编辑器系统。
+
+\subsection{基于弧球（Arcball）模型的编辑器相机}
+本系统实现了一套名为 \texttt{EditorCamera} 的专业相机控制器。与传统第一人称相机不同，弧球相机更适合于观察静态物体的材质表现。
+\begin{itemize}
+    \item \textbf{旋转逻辑}：通过 Alt + LMB 组合键，将鼠标的 2D 偏移量映射为球面上的经纬度变化，实现平滑的球心绕轨道（Orbit）观察。
+    \item \textbf{平移与缩放}：利用 Alt + MMB/RMB 实现摄像机在视平面内的平移及沿视线方向的无级缩放。
+\end{itemize}
+系统通过对偏航角（Yaw）与俯仰角（Pitch）的实时插值，计算出最新的视图矩阵 $\mathbf{V}$，并将其通过推送常量（Push Constants）每一帧分发至所有渲染 Pass。
+
+\subsection{GLTF 2.0 场景载入与材质字典映射}
+系统集成了轻量级的 \texttt{cgltf} 库，能够完整解析复杂的 GLTF 2.0 场景节点树。
+在载入阶段，系统会遍历 GLTF 中的材质（Material）描述，自动将其映射至引擎内部的材质字典。如果模型包含 PBR 贴图（如金属性-粗糙度贴图），系统会自动将其解压并转换至符合 Vulkan 规范的 SRGB 或线性空间纹理格式，并自动存入上文所述的 Bindless 全局资源池中。这种自动化的材质映射机制，使得从 Substance Painter 等美术工具导出的资产能够“零修改”直接呈现在混合渲染器中。
 
 \section{本章小结}
 
-本章系统性地剖析了混合渲染引擎的核心管线实现。通过解耦几何处理与光照计算，系统利用光栅化高效构建了包含深度、法线及运动矢量的高精度 G-Buffer. 在物理光照求解层面，创新性地结合了两种硬件加速特性：利用轻量级的 Ray Query 实现了精准无伪影的直接光软硬阴影；利用全特性的 RT Pipeline 攻克了多重反弹的 PBR 镜面反射难题。通过合理的 HDR 光照合成与色调映射策略，该管线成功地将离线级的光追画质引入实时帧率预算中。然而，受限于 1 SPP 的极低采样率，当前的光追信号仍伴随强烈的蒙特卡洛噪声，后续第五章将详细论述如何通过时空降噪算法彻底解决这一视觉缺陷。
+本章详细探讨了混合渲染管线的工程实现细节。首先确立了高效率核 G-Buffer 显存布局，并通过 Bindless 材质架构彻底打破了光线追踪中的全局资源访问瓶颈。随后，利用 Ray Query 与蓝噪声采样技术攻克了无伪影的物理软阴影，并依托 RT Pipeline 与 GGX 重要性采样实现了高效的复杂镜面反射。最后，通过严密的 TLAS 同步机制与自动化着色器流水线，保障了动态场景的运行稳定性与开发迭代效率。该管线为后续章节中极其依赖几何与光照特征此时空降噪算法（SVGF），提供了一个极其纯净且物理正确的高质量数据底座。

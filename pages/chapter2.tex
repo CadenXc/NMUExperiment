@@ -1,101 +1,253 @@
 \chapter{实时混合渲染理论基础}
 
-构建高保真的实时光线追踪混合渲染器，需要跨越物理光学、底层图形 API 架构以及硬件加速算法三个维度的知识壁垒。本章将系统性地阐述基于物理的渲染（PBR）核心数学模型、Vulkan 图形 API 的显式状态管理机制，以及硬件级光线追踪的底层运行原理，为后续章节的混合管线架构设计与具体算法实现提供完备的理论支撑。
+构建高保真的实时光线追踪混合渲染器，不仅是一项复杂的软件工程任务，更需要跨越计算机图形学基础、物理光学、概率论数值积分方法、底层图形硬件架构以及信号处理理论等多个维度的知识壁垒。本章将从传统的经典光栅化渲染管线出发，系统性地阐述坐标变换与光栅化的数学基础及其固有的物理局限性；随后详细解析基于物理的渲染（PBR）核心数学模型、蒙特卡洛积分理论与 Vulkan 图形 API 的显式状态管理机制；最后深入探讨硬件级光线追踪的底层运行机制。这些跨学科的理论体系将为后续章节的混合管线架构设计、光照算法实现以及时空降噪网络的构建提供完备且严谨的理论支撑。
 
-\section{基于物理的渲染（PBR）理论模型}
+\subsection{三维坐标系与空间变换数学模型}
 
-为了在虚拟场景中生成具有高度真实感的材质表现，本系统完全遵循工业标准的基于物理的渲染（Physically Based Rendering, PBR）工作流。PBR 的核心在于严格遵守能量守恒定律，并通过数学模型近似模拟光线与微观物体表面的物理交互。
+现代光栅化图形管线是一条高度优化的单向数据流流水线，其首要任务是将三维空间中的几何顶点准确投射到二维屏幕上。由于传统的三维向量无法通过单一的线性矩阵乘法同时表示旋转、缩放与平移，图形学引入了齐次坐标（Homogeneous Coordinates），将三维坐标 $(x, y, z)$ 升维至四维 $(x, y, z, w)$。基于齐次坐标的仿射变换（Affine Transformation）构成了光栅化管线的数学基石。 
+
+整个顶点映射过程需要经历严密的线性代数矩阵变换序列，即经典的 MVP 变换（Model-View-Projection）以及后续的视口映射：
+
+\begin{enumerate}
+    \item \textbf{模型变换（Model Transformation）}：将顶点从物体的局部坐标系（Local Space）变换至世界坐标系（World Space）。该变换矩阵 $M_{model}$ 通常由缩放矩阵 $S$、旋转矩阵 $R$ 与平移矩阵 $T$ 复合而成，即 $M_{model} = T \cdot R \cdot S$。以平移矩阵为例，其齐次形式定义为：
+    \begin{equation}
+    T(t_x, t_y, t_z) = 
+    \begin{bmatrix}
+    1 & 0 & 0 & t_x \\
+    0 & 1 & 0 & t_y \\
+    0 & 0 & 1 & t_z \\
+    0 & 0 & 0 & 1
+    \end{bmatrix}
+    \end{equation}
+
+    \item \textbf{视图变换（View Transformation）}：将世界坐标系变换至以摄像机为原点的视图坐标系（View Space / Camera Space）。假设摄像机的位置为 $\vec{e}$，观察目标点为 $\vec{t}$，向上的参考向量为 $\vec{u}$。首先构建摄像机坐标系的标准正交基：前向向量 $\vec{f} = \frac{\vec{t} - \vec{e}}{||\vec{t} - \vec{e}||}$，右向量 $\vec{r} = \frac{\vec{f} \times \vec{u}}{||\vec{f} \times \vec{u}||}$，以及真正的上向量 $\vec{u'} = \vec{r} \times \vec{f}$。视图矩阵 $M_{view}$ 可推导为先平移后旋转的逆变换矩阵：
+    \begin{equation}
+    M_{view} = 
+    \begin{bmatrix}
+    r_x & r_y & r_z & 0 \\
+    u'_x & u'_y & u'_z & 0 \\
+    -f_x & -f_y & -f_z & 0 \\
+    0 & 0 & 0 & 1
+    \end{bmatrix}
+    \begin{bmatrix}
+    1 & 0 & 0 & -e_x \\
+    0 & 1 & 0 & -e_y \\
+    0 & 0 & 1 & -e_z \\
+    0 & 0 & 0 & 1
+    \end{bmatrix}
+    \end{equation}
+
+    \item \textbf{投影变换（Projection Transformation）}：引入透视除法以产生“近大远小”的真实深度感。顶点被变换至齐次裁剪空间（Clip Space）。在该空间下，硬件将自动剔除处于视锥体（Frustum）之外的几何图元。标准的透视投影矩阵 $M_{proj}$ 定义为：
+    \begin{equation}
+    M_{proj} = 
+    \begin{bmatrix}
+    \frac{1}{aspect \cdot \tan(fov/2)} & 0 & 0 & 0 \\
+    0 & \frac{1}{\tan(fov/2)} & 0 & 0 \\
+    0 & 0 & -\frac{f+n}{f-n} & -\frac{2fn}{f-n} \\
+    0 & 0 & -1 & 0
+    \end{bmatrix}
+    \end{equation}
+    其中 $fov$ 为视场角（Field of View），$aspect$ 为屏幕宽高比，$n$ 和 $f$ 分别为近剪裁面与远剪裁面的距离。注意矩阵的最后一行变成了 $(0, 0, -1, 0)$，这是为了将摄像机空间下的 $-z$ 值保存至齐次坐标的 $w$ 分量中。
+
+    \item \textbf{透视除法与标准化设备坐标（NDC）}：在投影变换之后，GPU 硬件会自动执行透视除法（Perspective Division），即将顶点的四维齐次坐标统一除以其 $w$ 分量：
+    \begin{equation}
+    P_{ndc} = \left( \frac{x_{clip}}{w_{clip}}, \frac{y_{clip}}{w_{clip}}, \frac{z_{clip}}{w_{clip}} \right)
+    \end{equation}
+    此时，所有可见的三维顶点被严格压缩至一个边长为 $2$ 的标准立方体中，即 $x, y \in [-1, 1]$（Vulkan 中 $z \in [0, 1]$），形成标准化设备坐标（Normalized Device Coordinates, NDC）。
+
+    \item \textbf{视口变换（Viewport Transformation）}：最后，系统将 NDC 坐标映射到实际的二维屏幕像素矩阵上。设屏幕宽度为 $W$，高度为 $H$，屏幕坐标系原点位于左上角，则视口变换公式为：
+    \begin{equation}
+    x_{screen} = \frac{x_{ndc} + 1}{2} \cdot W, \quad y_{screen} = \frac{y_{ndc} + 1}{2} \cdot H
+    \end{equation}
+    至此，三维空间中的几何顶点彻底完成了向二维像素物理地址的转换，为后续的重心坐标插值与片元着色奠定了基础。
+\end{enumerate}
+
+\subsection{图元装配与重心坐标光栅化}
+
+顶点经过透视除法映射到标准化设备坐标（NDC）并完成视口变换后，硬件将分散的顶点组装为具有拓扑关系的三角形图元。随后，光栅化器（Rasterizer）接管流程，将连续的二维三角形离散化为屏幕像素网格上的片元（Fragments）。这一阶段包含三个极其严密的数学判定与插值过程：
+
+\begin{enumerate}
+    \item \textbf{图元装配与背面剔除（Backface Culling）}：
+    在三维模型中，绝大多数封闭网格的背面是对摄像机不可见的。为了节省光栅化算力，硬件会根据三角形在屏幕空间的顶点环绕顺序（Winding Order，如逆时针为正面）进行剔除。设三角形的三个屏幕顶点为 $V_0(x_0, y_0)$、$V_1(x_1, y_1)$ 和 $V_2(x_2, y_2)$，通过计算边向量的二维叉积，可以得到有向面积的两倍：
+    \begin{equation}
+    S = (x_1 - x_0)(y_2 - y_0) - (x_2 - x_0)(y_1 - y_0)
+    \end{equation}
+    若 $S \le 0$，则表示该三角形背向摄像机或退化为一条线，硬件将直接将其丢弃。
+
+    \item \textbf{边方程（Edge Equations）与像素相交测试}：
+    对于通过剔除的三角形，光栅化器需要遍历屏幕像素（通常结合分块包围盒优化），判断像素中心 $P(x, y)$ 是否位于三角形内部。现代 GPU 广泛采用 Juan Pineda 于 1988 年提出的边方程算法。对于有向边 $V_i \to V_j$，定义边函数 $E_{ij}(x, y)$ 为：
+    \begin{equation}
+    E_{ij}(x, y) = (x - x_i)(y_j - y_i) - (y - y_i)(x_j - x_i)
+    \end{equation}
+    当且仅当像素 $P(x, y)$ 对于三角形的三条边均满足 $E_{01} \ge 0$、$E_{12} \ge 0$ 和 $E_{20} \ge 0$（或同为负）时，该像素被判定为位于三角形内部，从而生成一个有效片元。
+
+    \item \textbf{重心坐标（Barycentric Coordinates）的几何推导}：
+    在确认像素位于三角形内部后，系统需要利用重心坐标 $(\alpha, \beta, \gamma)$ 在三角形内部平滑插值顶点的各种属性（如法线、UV 坐标、颜色等）。重心坐标本质上是面积比，对于点 $P(x, y)$，其系数可通过边函数的值直接求得：
+    \begin{equation}
+    P(x, y) = \alpha V_0 + \beta V_1 + \gamma V_2
+    \end{equation}
+    \begin{equation}
+    \alpha = \frac{E_{12}(x, y)}{E_{12}(x_0, y_0)}, \quad \beta = \frac{E_{20}(x, y)}{E_{20}(x_1, y_1)}, \quad \gamma = \frac{E_{01}(x, y)}{E_{01}(x_2, y_2)}
+    \end{equation}
+    其中，$\alpha + \beta + \gamma = 1$。
+    
+    \item \textbf{透视校正插值（Perspective-Correct Interpolation）}：
+    在早期的三维渲染中，直接利用上述屏幕空间的重心坐标对顶点属性 $I$（如纹理 UV）进行线性插值（$I_p = \alpha I_0 + \beta I_1 + \gamma I_2$）会导致严重的视觉透视扭曲。这是因为投影变换是非线性的，屏幕空间上的均匀步进并不对应三维物理空间中的均匀步进。
+    为了实现物理正确的插值，现代管线引入了透视校正机制。真正的插值必须在齐次裁剪空间的 $w$ 分量（代表深度）的辅助下完成。首先对 $1/w$ 进行屏幕空间线性插值以求得当前像素的真实深度权重：
+    \begin{equation}
+    \frac{1}{w_p} = \alpha \frac{1}{w_0} + \beta \frac{1}{w_1} + \gamma \frac{1}{w_2}
+    \end{equation}
+    随后，对目标属性 $I$ 除以 $w$ 后的值进行插值，再乘以像素真实的 $w_p$：
+    \begin{equation}
+    I_p = w_p \left( \alpha \frac{I_0}{w_0} + \beta \frac{I_1}{w_1} + \gamma \frac{I_2}{w_2} \right)
+    \end{equation}
+\end{enumerate}
+
+基于上述深度的数学推导与透视校正机制，光栅化器以极高的并行效率生成了海量准确的片元，并将其送入片元着色器（Fragment Shader）执行局部光照计算，最后利用 Z-Buffer 算法通过深度比较完成可见性测试。
+
+\subsection{光栅化管线的物理局限性与算法妥协}
+尽管光栅化极具并行计算效率，但它本质上是一种将三维空间强行投影到二维平面的“局部几何求解器”。在片元着色器计算光照时，管线仅能获取当前像素所属图元的局部属性（如法线、材质），对场景中其他几何体的存在与空间遮挡关系一无所知。因此，光栅化无法天然求解渲染方程中涉及半球空间积分的全局光照问题。为了在光栅化框架下模拟这些现象，工业界发展了大量基于图像空间（Image-Space）的近似算法，但这些算法均存在无法逾越的物理局限性：
+\begin{itemize}
+    \item \textbf{物理遮挡阴影（Shadows）}：传统管线必须依赖阴影贴图（Shadow Map）技术，即从光源视角预渲染一张深度图。该技术存在严重的透视走样（Perspective Aliasing）与投影走样（Projective Aliasing）。此外，为了解决离散纹理采样导致的自遮挡伪影（Shadow Acne），必须引入经验性的深度偏移（Depth Bias），但这又会引发物体悬浮的“彼得潘现象”（Peter Panning）。
+    \item \textbf{镜面反射（Specular Reflections）}：纯光栅化通常依赖屏幕空间反射（Screen Space Reflection, SSR）。SSR 通过在当前的深度缓冲（Depth Buffer）上进行步进光线投射（Ray Marching）来寻找交点。由于深度缓冲仅保留了场景最表层的二维信息，当反射射线指向屏幕外（Off-screen），或目标物体被前景物体遮挡时，SSR 算法将彻底失效，导致反射画面出现突兀的断裂与大面积的信息丢失。
+    \item \textbf{间接光照与全局照明（Global Illumination, GI）}：光线在物理世界中会在多个表面间发生多次反弹（Multi-bounce）。在光栅化下，由于缺乏场景的全局拓扑结构，极难实现实时的多次反弹计算。现有的屏幕空间全局光照（SSGI）或体素光照（VXGI）要么极度缺乏精度，要么面临巨大的内存与体素化开销。
+\end{itemize}
+综上所述，这些基于屏幕空间或预计算的经验近似算法在复杂场景中不仅会产生不可避免的视觉伪影，而且各种特效（SSR, SSAO, CSM）的堆叠导致渲染管线极度臃肿。这就从根本上确立了本课题引入硬件级光线追踪，以第一性原理（First Principles）获取物理正确光影的绝对必要性。
+
+\section{光线追踪基本原理与发展脉络}
+
+为了解决光栅化的全局光照缺失问题，光线追踪（Ray Tracing）技术应运而生。它从物理光学原理出发，逆向模拟了光线从光源发出、在场景表面反弹、最终进入虚拟相机的传播过程，从而在算法底层实现了真正的全局照明。
+
+\subsection{经典光线追踪（Whitted-style Ray Tracing）}
+1980 年，Turner Whitted 提出了经典的递归光线追踪算法。该算法从摄像机向屏幕每个像素发射一条初始射线（Primary Ray）。当射线与场景中的几何表面相交时，算法会立即向场景中的所有已知光源发射阴影射线（Shadow Ray）以判断是否被遮挡。 [Image of Whitted style ray tracing reflection and refraction] 
+如果表面是完美的镜面或透明介质，算法会根据斯涅尔定律（Snell's Law）和反射定律，生成精确的反射射线（Reflection Ray）与折射射线（Refraction Ray），并沿这些新射线的方向进行递归追踪。局部光照强度 $I$ 可用递归公式表示为：
+\begin{equation}
+I = I_{local} + k_r \cdot I_{reflection} + k_t \cdot I_{refraction}
+\end{equation}
+其中 $k_r$ 和 $k_t$ 分别为反射与折射系数。然而，该算法的局限性在于：它仅能处理理想的光滑镜面与点光源，无法模拟自然界中普遍存在的粗糙表面模糊反射（Glossy Reflection）、面积光源产生的软阴影（Soft Shadows）以及漫反射表面间的颜色溢出（Color Bleeding）。
+
+\subsection{路径追踪（Path Tracing）与维度灾难}
+1986 年，James Kajiya 将蒙特卡洛数值积分（Monte Carlo Integration）引入图形学，正式提出了路径追踪（Path Tracing）算法。与 Whitted 算法固定发射反射/折射射线不同，路径追踪放弃了理想镜面的假设。在每次射线命中表面时，算法将表面材质的半球双向反射分布函数（BRDF）视作一个概率密度函数（PDF），并在半球空间内随机采样一个反弹方向继续追踪。
+
+渲染方程的本质是一个无穷维的连续积分问题，传统数值积分（如梯形法则、辛普森法则）在处理此类高维积分时会遭遇“维度灾难”（Curse of Dimensionality），计算量呈指数级爆炸。而路径追踪巧妙地利用了蒙特卡洛方法的特性，其收敛速度 $O(N^{-1/2})$ 与积分维度无关。
+当向每个像素发射的采样射线数量（SPP, Samples Per Pixel）趋于无穷大时，路径追踪的期望值能够无偏差（Unbiased）地收敛于物理世界的真实光照分布，奠定了现代电影级离线渲染的数学基础。但在实时渲染领域，由于极端的算力限制，本系统通常只能采用极低的采样率（如 1 SPP），这也直接导致了积分结果极度发散，表现为画面上剧烈的蒙特卡洛高频噪声。
+
+\subsection{辐射度量学核心物理量与理论约束}
+在计算机图形学中，描述光线能量及其在空间中分布的核心物理量包括：
+\begin{itemize}
+    \item \textbf{辐射通量（Radiant Flux, $\Phi$）}：光源在单位时间内辐射出的总能量，单位为瓦特（W）。
+    \item \textbf{辐照度（Irradiance, $E$）}：单位面积 $A$ 上接收到的辐射通量，定义为 $E = \frac{d\Phi}{dA}$。
+    \item \textbf{辐射亮度（Radiance, $L$）}：衡量单一光线强度的最核心物理量。定义为单位投影面积、单位立体角 $\omega$ 上的辐射通量，并需考虑表面法线 $n$ 与光线方向夹角 $\theta$ 的余弦衰减：
+    \begin{equation}
+    L = \frac{d^2\Phi}{d\omega dA \cos\theta}
+    \end{equation}
+\end{itemize}
+
+材质对光线的反射特性由双向反射分布函数（BRDF）$f_r(p, \omega_i, \omega_o)$ 描述。一个物理正确的 BRDF 模型必须满足两大物理约束：
+\begin{enumerate}
+    \item \textbf{亥姆霍兹光路可逆性（Helmholtz Reciprocity）}：入射光路与反射光路相互反转时，BRDF 值必须保持不变，即 $f_r(p, \omega_i, \omega_o) = f_r(p, \omega_o, \omega_i)$。
+    \item \textbf{能量守恒定律（Energy Conservation）}：表面反射出的总能量绝不能超过入射的总能量。对于法线上半球空间 $\Omega$ 内的任意入射方向，必须满足：
+    \begin{equation}
+    \int_{\Omega} f_r(p, \omega_i, \omega_o) (n \cdot \omega_o) d\omega_o \le 1
+    \end{equation}
+\end{enumerate}
+
+\section{辐射度量学与基于物理的渲染（PBR）理论}
+
+为了在虚拟场景中生成具有高度真实感的材质表现，本系统完全遵循工业标准的基于物理的渲染（Physically Based Rendering, PBR）工作流。PBR 的核心在于严格遵守能量守恒定律，并依托辐射度量学（Radiometry）精确量化光能的传输。
+
+\subsection{辐射度量学核心物理量与半球积分}
+在计算机图形学中，描述光线能量及其在三维空间中分布的核心物理量包括：
+\begin{itemize}
+    \item \textbf{辐射通量（Radiant Flux, $\Phi$）}：光源在单位时间内辐射出的总能量，单位为瓦特（W）。
+    \item \textbf{辐射亮度（Radiance, $L$）}：衡量单一光线强度的最核心物理量，也是光线追踪算法在空间中实际传递的数值。定义为单位投影面积、单位立体角 $\omega$ 上的辐射通量：
+    \begin{equation}
+    L = \frac{d^2\Phi}{d\omega dA \cos\theta}
+    \end{equation}
+    \item \textbf{辐照度（Irradiance, $E$）}：单位面积 $A$ 上接收到的辐射通量。它与辐射亮度的数学关系表现为对法线上半球空间 $\Omega$ 的积分：
+    \begin{equation}
+    E = \int_{\Omega} L_i(\omega) \cos\theta d\omega
+    \end{equation}
+\end{itemize}
+
+材质对光线的反射特性由双向反射分布函数（BRDF）$f_r(p, \omega_i, \omega_o)$ 描述。一个物理正确的 BRDF 模型必须满足两大物理约束：
+\begin{enumerate}
+    \item \textbf{亥姆霍兹光路可逆性（Helmholtz Reciprocity）}：入射光路与反射光路相互反转时，BRDF 值必须保持不变，即 $f_r(p, \omega_i, \omega_o) = f_r(p, \omega_o, \omega_i)$。
+    \item \textbf{能量守恒定律（Energy Conservation）}：表面反射出的总能量绝不能超过入射的总能量。对于法线上半球空间 $\Omega$ 内的任意入射方向，必须满足：
+    \begin{equation}
+    \int_{\Omega} f_r(p, \omega_i, \omega_o) (n \cdot \omega_o) d\omega_o \le 1
+    \end{equation}
+\end{enumerate}
 
 \subsection{渲染方程（The Rendering Equation）}
-
-计算机图形学中所有的光照计算，本质上都是在求解或近似求解由 Kajiya 于 1986 年提出的渲染方程。对于场景中表面上的任意一点 $p$，其向观察方向 $\omega_o$ 辐射出的总光亮度 $L_o(p, \omega_o)$ 可以表示为：
-
+基于上述辐射度量学理论，计算机图形学中所有的光照计算，本质上都是在求解由 Kajiya 提出的渲染方程。对于场景中表面上的任意一点 $p$，其向观察方向 $\omega_o$ 辐射出的总光亮度 $L_o(p, \omega_o)$ 可以表示为： [Image of rendering equation hemisphere integration]
 \begin{equation}
 L_o(p, \omega_o) = L_e(p, \omega_o) + \int_{\Omega} f_r(p, \omega_i, \omega_o) L_i(p, \omega_i) (n \cdot \omega_i) d\omega_i
 \label{eq:rendering_equation}
 \end{equation}
+其中，$L_e$ 为自发光项；$\Omega$ 表示法线上半球空间；$L_i$ 为来自入射方向 $\omega_i$ 的入射光亮度；$(n \cdot \omega_i)$ 遵循兰伯特余弦定律，模拟了光束截面积随入射角度变大而造成的能量密度衰减。
 
-其中：
-\begin{itemize}
-    \item $L_e(p, \omega_o)$ 表示点 $p$ 自身的自发光辐射亮度。
-    \item $\Omega$ 表示点 $p$ 所在表面的法线上半球空间。
-    \item $f_r(p, \omega_i, \omega_o)$ 为双向反射分布函数（BRDF），描述了从入射方向 $\omega_i$ 来的光线在表面反射到观察方向 $\omega_o$ 的比例。
-    \item $L_i(p, \omega_i)$ 表示来自入射方向 $\omega_i$ 的入射光亮度。
-    \item $(n \cdot \omega_i)$ 为衰减项，即入射光方向与表面法线夹角的余弦值，遵循兰伯特余弦定律。
-\end{itemize}
-
-在传统的实时光栅化中，该积分项通常被极度简化（如仅计算几个点光源的解析解）。而在本课题中，我们将利用光线追踪技术，通过蒙特卡洛积分（Monte Carlo Integration）对该半球空间进行随机采样，以逼近该方程的真实解。
-
-\subsection{Cook-Torrance 微面元模型}
-
-为了精确描述材质的 BRDF 函数 $f_r$，本系统采用了广泛应用于现代游戏引擎的 Cook-Torrance 微面元模型。该模型假设所有物体表面在微观尺度下均由无数个绝对光滑的微小镜面组成。BRDF 被拆分为漫反射（Diffuse）与镜面反射（Specular）两部分：
-
-\begin{equation}
-f_r = k_d f_{diffuse} + k_s f_{specular}
-\end{equation}
-
-其中 $k_d$ 和 $k_s$ 分别代表折射（漫反射）和反射（镜面高光）的能量比例，且满足能量守恒 $k_d + k_s \le 1$。镜面反射项的计算公式为：
-
+\subsection{Cook-Torrance 微面元模型与物理推导}
+为了精确求解方程中的 BRDF 函数 $f_r$，本系统采用了广泛应用于现代渲染引擎的 Cook-Torrance 微面元模型。该模型基于 V-Cavity（V型凹槽）假设，认为宏观表面在微观尺度下由无数个法线朝向各异的光滑微小镜面（Microfacets）组成。 [Image of microfacet BRDF masking and shadowing] 其高光反射项解析式为：
 \begin{equation}
 f_{specular} = \frac{D(h) F(v, h) G(l, v, h)}{4 (n \cdot l)(n \cdot v)}
 \end{equation}
-
+其中，$h$ 为视线 $v$ 与光线 $l$ 的半程向量，分母中的 $4 (n \cdot l)(n \cdot v)$ 是从微观几何投影到宏观几何的物理校正因子。三大核心项的具体物理推导为：
 \begin{itemize}
-    \item \textbf{法线分布函数 D (Normal Distribution Function)}：本系统采用 GGX (Trowbridge-Reitz) 分布，用于计算微观法线与半程向量 $h$ 对齐的微面元比例，直接决定了高光的粗糙度（Roughness）与光晕形状。
-    \item \textbf{菲涅尔方程 F (Fresnel Equation)}：采用 Schlick 近似法，描述了不同观察角度下表面反射光线与折射光线的比例，用于区分金属与非金属（绝缘体）的光学特性。
-    \item \textbf{几何遮蔽函数 G (Geometry Function)}：采用 Smith 联合遮蔽阴影函数，用于模拟微面元之间相互遮挡（Shadowing）与遮蔽（Masking）导致的能量流失。
+    \item \textbf{法线分布函数（NDF, $D$ 项）}：采用 Trowbridge-Reitz GGX 分布，决定了微表面法线 $m$ 与半程向量 $h$ 精确对齐的概率。它直接决定了高光斑的面积与粗糙度（拖尾效应），其中 $\alpha = Roughness^2$：
+    \begin{equation}
+    D_{GGX}(n, h, \alpha) = \frac{\alpha^2}{\pi \left( (n \cdot h)^2 (\alpha^2 - 1) + 1 \right)^2}
+    \end{equation}
+    \item \textbf{菲涅尔方程（Fresnel, $F$ 项）}：描述掠射角反射率攀升的物理现象。物理上，基础反射率 $F_0$ 由复折射率（Index of Refraction, IOR）的实部 $n_1, n_2$ 决定：$F_0 = \left(\frac{n_1 - n_2}{n_1 + n_2}\right)^2$。为避免复杂的实时计算，本系统采用 Schlick 近似模型：
+    \begin{equation}
+    F_{Schlick}(h, v, F_0) = F_0 + (1 - F_0)(1 - (h \cdot v))^5
+    \end{equation}
+    \item \textbf{几何遮蔽函数（Geometry, $G$ 项）}：采用 Smith 联合遮蔽函数，模拟微面元之间光线在射入时被遮挡（Shadowing）与反射时被自身遮蔽（Masking）导致的能量流失。
+    \begin{equation}
+    G_1(n, x, k) = \frac{n \cdot x}{(n \cdot x)(1 - k) + k}
+    \end{equation}
 \end{itemize}
 
-% [此处插入图2-1：微面元光照反射与几何遮蔽示意图]
-% \begin{figure}[htb]
-%   \centering
-%   \includegraphics[width=0.6\textwidth]{figures/chapter2/microfacet.png}
-%   \caption{微面元光照反射与几何遮蔽示意图}
-%   \label{fig:microfacet}
-% \end{figure}
+\section{现代图形 API 与底层硬件调度架构}
 
-\section{现代图形 API 与 Vulkan 核心特性}
+光线追踪算法的高效落地，不仅依赖于严格的数学推导，更极其受制于现代图形处理器（GPU）的物理架构特性。本系统选用的 Vulkan API，正是为了最大限度地贴合底层硅片工作原理而设计的显式接口。
 
-本课题选择 Vulkan 1.3 作为底层图形 API，而非传统的 OpenGL。Vulkan 是一种显式（Explicit）、低开销的跨平台图形接口，其架构设计极大地契合了现代多核 CPU 与高度并行化 GPU 的特性。
+\subsection{SIMT 架构与线程发散（Divergence）瓶颈}
+现代 GPU 采用单指令多线程（SIMT, Single Instruction Multiple Threads）的流式处理器架构。GPU 的底层计算单元以线程束（Wavefront/Warp，通常包含 32 或 64 个线程）为基本调度单位。在同一个线程束内的所有线程，必须在统一的程序计数器（Program Counter）驱动下，在相同时钟周期内执行完全相同的机器指令。 
 
-\subsection{指令缓冲与队列提交（Command Buffers \& Queues）}
+在传统光栅化中，相邻像素通常属于同一个三角形，其着色与内存拾取逻辑高度一致，SIMT 执行效率逼近理论极限，且容易触发显存访问的全局合并（Memory Coalescing）。然而，在光线追踪中，当一束高度相干的初始光线击中不同粗糙度、不同法向的场景表面后，其反弹产生的次级射线（Secondary Rays）方向会变得极度随机散乱（Incoherent Rays）。
+这种非相干射线会导致同一线程束内的指令路径出现巨大的发散（Execution Divergence）。例如，线程 A 需要遍历复杂的树结构，而线程 B 仅需简单的环境光采样，由于 SIMT 的锁步特性，线程 B 必须被硬件强制挂起（Active Mask 设为 0）以等待线程 A 完成。此外，发散的射线会导致 L1/L2 缓存的命中率（Cache Hit Rate）断崖式下跌，引发极高的显存延迟。因此，将高度相干的几何提取交由光栅化阶段统一处理（生成 G-Buffer），仅将不可避免的非相干物理计算交由光追处理的“混合渲染管线”，是对当前硬件架构的最优妥协。
 
-在 Vulkan 中，所有的渲染绘制与内存拷贝指令不再直接发送给显卡驱动，而是由开发者显式地录制到指令缓冲（Command Buffer）中。录制完成的指令缓冲会被提交至 GPU 的特定队列（Graphics Queue, Compute Queue 或 Transfer Queue）中异步执行。这种机制使得本系统的混合渲染架构能够利用多线程在 CPU 端并行录制光栅化与光追的渲染指令，彻底消除了传统 API 的单线程驱动瓶颈。
+\subsection{Vulkan 显式内存屏障与流水线同步}
+与传统 OpenGL 驱动在后台隐式管理巨大的全局状态机不同，Vulkan 所有的渲染状态设置与指令录制由开发者显式操作至指令缓冲（Command Buffer）中。由于驱动程序剥离了冒险检测逻辑，系统必须手动插入管线内存屏障（Pipeline Memory Barrier）。
+开发者必须精准定义执行依赖（Execution Dependency，即阻塞流水线中的哪几个 Stage）与内存依赖（Memory Dependency，即刷新或无效化哪些 Cache）。这种将硬件同步的底层权力下放的设计，虽大幅增加了代码复杂度，但彻底消除了单线程 CPU 提交瓶颈，直接催生了本文第三章 Render Graph 自动化并发调度架构。
 
-\subsection{显式的资源管线屏障（Pipeline Barriers）}
+\section{硬件加速光线追踪底层机制}
 
-延迟渲染与光线追踪的混合管线对资源的读写顺序有着极其严苛的要求。例如，光栅化阶段必须先完成 G-Buffer 中深度和法线纹理的写入，随后的光线追踪计算着色器才能对其进行采样。
+在纯计算着色器（Compute Shader）中执行光线追踪遍历极其耗时。本系统利用 NVIDIA RTX 系列显卡提供的 RT Core 专用硅片单元，实现了光线与几何体的极速求交计算。
 
-在 Vulkan 中，驱动程序默认不会进行任何隐式同步。本系统必须通过插入显式的管线屏障（Pipeline Memory Barrier），手动定义资源的布局转换（Layout Transition，如从 COLOR\_ATTACHMENT\_OPTIMAL 转换为 SHADER\_READ\_ONLY\_OPTIMAL）与访问权限转移（Access Masks）。对管线屏障的精准控制，是构建高性能无冲突渲染器的核心难点。
+\subsection{表面积启发式（SAH）与两级加速结构}
+为了避免 $O(N)$ 复杂度的暴力求交，场景几何必须被组织为包围盒层级结构（Bounding Volume Hierarchy, BVH）。构建高质量 BVH 树的核心在于贪心优化表面积启发式算法（Surface Area Heuristic, SAH）。 
+SAH 算法假设一条随机光线击中包围盒 $B$ 的概率与其表面积 $S(B)$ 成正比。在拆分树节点时，SAH 试图最小化光线遍历该节点的预期开销代价函数 $C$：
+\begin{equation}
+C = C_{trav} + \frac{S_L}{S_P} N_L C_{int} + \frac{S_R}{S_P} N_R C_{int}
+\end{equation}
+其中，$C_{trav}$ 为遍历节点的代价；$S_P, S_L, S_R$ 分别为父节点与左右子树的表面积；$N_L, N_R$ 为子树包含的三角形图元数量。
+在 Vulkan 体系中，该加速结构被强制解耦为两级：底层加速结构（BLAS，包含极难构建的静态网格几何）与顶层加速结构（TLAS，包含轻量级的动态实例变换矩阵），从而保障了动态场景中光追加速结构的毫秒级实时更新。
 
-\section{硬件加速光线追踪技术原理}
-
-本系统利用 NVIDIA RTX 系列显卡提供的 RT Core 专用硬件单元，实现了射线与几何体的极速求交计算。Vulkan 通过标准扩展（KHR）暴露了这些硬件能力，主要依赖以下核心技术：
-
-\subsection{树状加速结构（Acceleration Structures）}
-
-在包含数百万个三角形的复杂 3D 场景中，让每条光线与所有三角形进行暴力求交是不现实的。Vulkan 将场景几何组织为层次包围盒树（BVH），并抽象为两种数据结构：
-\begin{itemize}
-    \item \textbf{底层加速结构（BLAS, Bottom-Level AS）}：直接包含网格的顶点与索引数据。通常为静态模型构建一次即可。
-    \item \textbf{顶层加速结构（TLAS, Top-Level AS）}：包含指向各个 BLAS 的实例（Instance），并附带每个实例的 3D 变换矩阵（Transform Matrix）与材质 ID。在场景物体发生位移时，只需轻量级地更新 TLAS，而无需重建沉重的 BLAS。
-\end{itemize}
-
-% [此处插入图2-2：BLAS 与 TLAS 两级加速结构示意图]
-% \begin{figure}[htb]
-%   \centering
-%   \includegraphics[width=0.8\textwidth]{figures/chapter2/as_structure.png}
-%   \caption{BLAS 与 TLAS 两级加速结构示意图}
-%   \label{fig:as_structure}
-% \end{figure}
-
-\subsection{两种光线追踪执行范式}
-
-在 Vulkan 中，本系统综合利用了两种不同的光追扩展接口，以达到性能与功能的最佳平衡：
+\subsection{着色器绑定表（SBT）与执行范式}
+本系统在 Vulkan 架构下综合利用了两种不同的光追执行范式：
 \begin{enumerate}
-    \item \textbf{Ray Query (光线查询，基于 VK\_KHR\_ray\_query)}：允许在任何现有的着色器（如片段着色器或计算着色器）中隐式定义光线并调用 rayQueryEXT 指令遍历 TLAS。其执行逻辑是在单线程内同步阻塞的，没有复杂的着色器绑定表（SBT）开销。本系统主要利用其进行局部的直接光软硬阴影（Shadow Ray）测试。
-    \item \textbf{RT Pipeline (光线追踪管线，基于 VK\_KHR\_ray\_tracing\_pipeline)}：一种全新的管线状态对象。光线通过光线生成着色器（RayGen）发射，在遍历 BVH 的过程中，由 GPU 硬件自动调度并触发未命中着色器（Miss）或最近命中着色器（ClosestHit）。它支持递归调用（如光线反弹）以及自定义载荷（Payload）传递，是本系统计算多重镜面反射与全局光照的核心方案。
+    \item \textbf{Ray Query（内联光线查询）}：在常规的片段或计算着色器中隐式定义光线，利用 \texttt{rayQueryProceedEXT} 触发 RT Core 遍历。它在单线程内同步阻塞，无需维护复杂的内存数据结构，非常适合局部的直接光软硬阴影测试。
+    \item \textbf{RT Pipeline（光线追踪专用管线）}：这是一种全新的异步状态机。它通过构建复杂的着色器绑定表（Shader Binding Table, SBT）来映射射线命中特定物体时该执行哪一段着色器代码。由 GPU 硬件自动调度并触发光线生成（RayGen）、未命中（Miss）或最近命中（ClosestHit）模块。其强大的递归调用与自定义载荷（Payload）寄存器传递能力，是本系统求解多重镜面反射的核心基石。
 \end{enumerate}
+
+\section{信号采样定理与走样原理}
+
+在渲染管线末端，离散的数字像素重构决定了画面的最终平滑度。根据信息论中的奈奎斯特-香农采样定理（Nyquist-Shannon Sampling Theorem），为了无损还原一个连续的空间或时间信号，采样频率必须至少严格大于该信号最高频率分量的两倍（$f_{sample} > 2 f_{max}$）。
+
+然而，在计算机图形学中，多边形几何体的锐利边界呈现为阶跃函数（Step Function），其经过傅里叶变换（Fourier Transform）后在频域上包含无穷高的空间频率。受限于物理显示器固定的像素网格分辨率（即采样频率的硬性上限），奈奎斯特极限必定被打破，从而产生了高频信号折叠至低频区段的现象，即空间走样（Spatial Aliasing，视觉上表现为锯齿狗牙）。同样，当物理相机快速移动时，时间维度的帧率采样不足也会导致高光闪烁与噪点蠕动（Temporal Aliasing）。这从纯粹的频域信号学底层，不可辩驳地确立了第五章中必须引入时间抗锯齿（TAA）多帧时域复用与前置低通滤波（Low-pass Filtering）的理论必然性。
 
 \section{本章小结}
 
-本章详细探讨了混合渲染器底层的理论基础。首先引入了渲染方程与 Cook-Torrance PBR 材质模型，明确了物理正确光照的计算公式；其次剖析了 Vulkan 图形 API 的指令录制与显式同步机制，揭示了底层状态管理的复杂性；最后阐述了基于 BVH 加速结构与两套 Vulkan 扩展指令的光线追踪运行原理。这些理论模型不仅定义了本课题“算什么”，更决定了本课题在 GPU 上“怎么算”，为第三章系统架构与 Render Graph 的设计奠定了坚实的基础。
+本章详细探讨了实时混合渲染引擎底层的跨学科理论基础体系。首先对比了传统光栅化管线坐标变换的物理局限性与光线追踪技术的全局优势；其次引入了 PBR 材质微面元模型与蒙特卡洛积分推导，不仅在数学上明确了光照的计算公式，更从概率论的方差层面上论证了降噪算法在实时渲染中的绝对必要性；随后剖析了 GPU 的 SIMT 执行瓶颈与 Vulkan 的显式内存同步机制；最后阐述了基于 SAH 代价函数的 BVH 加速结构与信号采样定理。这些严密的底层理论不仅定义了本课题“算什么”，更决定了在现代 GPU 上“怎么算”，为第三章系统架构的抽象与后续时空算法的落地奠定了坚实的技术基石。

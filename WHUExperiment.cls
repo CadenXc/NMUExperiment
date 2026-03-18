@@ -399,7 +399,7 @@
 \setlength{\cftbeforesecskip}{0pt}
  
 %%% ------ 脚注设置 ------- %%%%
-\RequirePackage{ctex}
+% \RequirePackage{ctex}  %
 \RequirePackage{pifont}
 \RequirePackage[perpage,symbol*]{footmisc}
 \DefineFNsymbols{circled}{{\ding{192}}{\ding{193}}{\ding{194}}
