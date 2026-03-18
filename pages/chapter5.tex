@@ -1,147 +1,76 @@
-\chapter{基于时空域的抗锯齿与降噪算法实现}
-\label{sec:svgf_impl}
+\chapter{信号重建与画质增强算法实现}
+\label{sec:algorithm_impl}
 
-在混合渲染管线中，受限于实时帧率的严苛性能预算，硬件光线追踪通常只能采用极低的采样率（如 1 SPP）。这使得原始的全局光照与反射信号呈现出剧烈的蒙特卡洛随机噪声。为了在不增加发射射线数量的前提下获得平滑的照片级画质，本系统集成并深度优化了时空方差导向滤波（Spatiotemporal Variance-Guided Filtering, SVGF）算法，并结合时间抗锯齿（TAA）技术，彻底解决了低采样率下的噪声与锯齿问题。SVGF 降噪网络的总体数据流架构与逻辑处理流程如图 \ref{fig:svgf_pipeline_data_flow} 与图 \ref{fig:svgf_flow_chat} 所示。
+本章将深入探讨在实时光线追踪低采样率（1 SPP）条件下，如何通过时空降噪与后期处理算法实现画质重建。重点阐述 SVGF 降噪网络、TAA 抗锯齿以及电影级色调映射的具体实现与调优过程。
+
+\section{硬件加速光线追踪的底层优化}
+
+在混合管线的底座之上，本章利用硬件级光路追踪求解高精度的间接光效应。
+
+\subsection{加速结构 (AS) 与着色器绑定表 (SBT)}
+为了实现高效的射线求交，系统构建了两级加速结构：底层（BLAS）存储网格几何，顶层（TLAS）处理实例变换。通过构建着色器绑定表（SBT），系统实现了对 RayGen、Miss 和 Closest Hit 着色器的灵活调度，从而支持了物理正确的反射与全局光照计算。
+
+\section{SVGF 时空方差引导降噪}
+
+实时光线追踪生成的图像伴随严重的蒙特卡洛噪声。本系统实现了工业级的 SVGF 算法。
+
+\subsection{反照率解耦 (Albedo Demodulation)}
+为了防止空域滤波模糊掉材质纹理，系统在滤波前将光照颜色除以反照率（Albedo）。这一策略确保了滤波过程仅作用于纯粹的光照信号，保留了高频纹理细节。
+
+\subsection{时域重投影与力矩累积}
+利用前一章生成的运动矢量（Motion Vector），系统将当前像素投影回上一帧。通过指数滑动平均（EMA）累积颜色与颜色力矩（Moments），实现了极高效率的信噪比提升，为方差估计提供了可靠的数据支撑。
+
+\subsection{边缘停止函数的空域滤波}
+系统执行 5 轮步长递增的 A-Trous 滤波。滤波权重由 G-Buffer 提供的深度梯度、法线一致性及亮度差异共同计算得出。实验证明，该方案能有效在抹平噪点的同时保护几何边缘的锐利度。
 
 \begin{figure}[H]
-  \centering
-  \includegraphics[width=0.95\textwidth]{figures/chapter5/svgf_pipeline_data_flow.png}
-  \caption{SVGF 时空方差导向滤波管线数据流全景图}
-  \label{fig:svgf_pipeline_data_flow}
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/rt_gi_raw.png}
+        \caption*{(a) 1 SPP 原始光追输出}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/rt_gi_svgf.png}
+        \caption*{(b) SVGF 降噪后结果}
+    \end{minipage}
+    \caption{SVGF 算法降噪效果验证}
+    \label{fig:svgf_result_impl}
 \end{figure}
+
+\section{时域抗锯齿 (TAA) 与动态稳定性}
+
+针对光栅化边缘走样与高频高光闪烁，系统实现了基于历史复用的 TAA 方案。
+
+\subsection{亚像素抖动补偿与色彩裁剪 (Color Clipping)}
+利用 Halton 序列对相机投影矩阵施加偏移。在历史采样阶段，为了消除由于遮挡变化产生的鬼影，系统在 YCoCg 色彩空间下计算 3x3 邻域的方差，并据此对历史颜色进行裁剪。这确保了画面在动态下的稳定性与锐利度。
 
 \begin{figure}[H]
-  \centering
-  \includegraphics[width=0.85\textwidth]{figures/chapter5/svgf_flow_chat.png}
-  \caption{SVGF 算法逐帧处理逻辑流程图}
-  \label{fig:svgf_flow_chat}
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/taa_comparison_off.png}
+        \caption*{(a) 禁用 TAA (边缘锯齿明显)}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/taa_comparison_on.png}
+        \caption*{(b) 开启 TAA (亚像素级平滑)}
+    \end{minipage}
+    \caption{TAA 开启前后的动态画质对比}
+    \label{fig:taa_result_impl}
 \end{figure}
 
-如图 \ref{fig:svgf_flow_chat} 所示，SVGF 的完整执行周期可以概括为：首先通过 G-Buffer 提取几何特征，接着利用重投影技术将当前帧光追结果与历史缓冲进行混合，随后实时估计局部方差，并以此引导后续的多轮空域滤波过程。
+\section{后期影像流水线与电影级合成}
 
-\section{SVGF 算法的总体流水线设计}
+\subsection{Bloom 辉光与 HDR 合成}
+系统提取 HDR 缓冲中的高亮区域进行多级高斯模糊，通过加法混合模拟镜头衍射效果。
 
-在混合渲染管线中，降噪算法并非孤立的后处理滤镜，而是一个深度集成在渲染图（Render Graph）中的多阶段信号处理网络。本系统实现的 SVGF 降噪流水线被拆分为一系列具有显式依赖关系的计算任务，其核心设计目标是在极低采样率（1 SPP）下重建具有物理意义的光照连续性。
-
-\subsection{基于渲染图的任务流水线拆解}
-结合本系统 \texttt{SVGFPass} 的工程实现，整个降噪过程被划分为以下三个核心计算阶段：
-\begin{enumerate}
-    \item \textbf{时域状态更新 Pass (\texttt{SVGF\_Temporal})}：
-    作为降噪管线的入口，该阶段负责处理历史信息的检索与混合。它通过 Render Graph 声明对当前帧光追结果、运动矢量、当前/历史几何特征（法线与深度）以及“历史颜色与矩缓冲”的读取依赖。其核心逻辑是在时域上建立像素级的关联，并计算一阶/二阶矩以估计局部方差。
-    
-    \item \textbf{级联 A-Trous 空域滤波 Pass (\texttt{SVGF\_Atrous\_i})}：
-    该阶段是一个迭代式的计算过程。根据系统配置，通常执行 5 轮空域滤波。每一轮迭代都是一个独立的 Compute Pass，其输入为上一轮的滤波结果，输出则作为下一轮的源数据。这种级联设计（Cascading Update）允许滤波核的感受野随迭代呈指数级增长，从而在不增加单次纹理采样开销的前提下，实现大范围的噪声抹平。
-    
-    \item \textbf{最终信号合成 Pass (\texttt{SVGF\_Combine})}：
-    在完成空域平滑后，合成阶段负责将滤波后的光照分量与原始反照率（Albedo）重新进行物理调制。此外，该 Pass 还会执行最后一轮时域稳定处理，消除由于空域滤波引入的微小闪烁（Flickering）。
-\end{enumerate}
-
-\subsection{历史反馈环路（Feedback Loop）的构建}
-为了实现方差的有效缩减，降噪管线必须具备跨帧状态记忆能力。在本系统的 Render Graph 架构中，这一需求通过“历史资源重用”机制实现。
-如图 \ref{fig:svgf_pipeline_data_flow} 所示，\texttt{SVGF\_Temporal} 阶段通过 \texttt{builder.ReadHistory} 接口获取上一帧生成的累积结果，而其当前的输出结果则通过 \texttt{SaveAsHistory} 标记，自动成为下一帧的输入数据。这种闭环设计使得每一个像素的方差估计能够随着渲染时间的推移不断趋于准确，从而在静止或缓慢移动的区域达到接近离线渲染的平滑质量。
-
-\subsection{降噪信号与材质纹理的解耦架构}
-在管线设计层面，本系统采用了“解耦-降噪-重新调制”的策略。在进入降噪流水线之前，系统首先利用 G-Buffer 中的 Albedo 对光追结果进行除法运算，提取纯净的辐照度（Irradiance）信号。
-这种设计的理论优势在于：复杂的降噪算法仅作用于低频的光照变化，而高频的贴图纹理（如木纹、岩石缝隙）则被隔离在降噪流程之外。通过这种工程手段，本系统彻底避免了降噪算法常见的“过度涂抹”导致的细节丢失问题，在保留物体表面质感的同时消除了噪点。
-
-\section{反照率解耦（Albedo Demodulation）预处理}
-
-在将原始噪点图送入降噪管线前，必须执行反照率解耦策略。其核心意义在于利用频率分离（Frequency Separation）的思想，防止空域滤波器对高频材质纹理造成误伤。
-
-\subsection{信号频率冲突与细节丢失分析}
-根据物理基渲染方程，像素最终呈现的颜色 $C$ 是材质属性（Albedo）与环境入射辐射率（Irradiance/Radiance）的乘积：$C = Albedo \times E$。
-在 1 SPP 的原始输出中，辐照度项 $E$ 包含了极其强烈的高频随机噪声；与此同时，材质属性项 $Albedo$ 同样包含高频信息（如木纹、砖块的颜色跳变）。如果直接对最终颜色 $C$ 进行空域滤波，A-Trous 滤波器将无法在数学上区分哪些频率波动来自于统计噪声，哪些来自于真实的材质纹理。这会导致在抹除噪点的同时，也抹杀了场景中精细的纹理特征，产生所谓的“油画感”或“过度平滑”伪影。
-
-\subsection{辐照度提取与数值稳定性控制}
-为了解决上述冲突，本系统在降噪管线的初始阶段执行解耦操作。通过读取 G-Buffer 中的无噪声反照率分量，将原始颜色分解为纯粹的光照辐照度信号 $E_{raw}$：
-\begin{equation}
-E_{raw} = \frac{C_{raw}}{Albedo_{g} + \epsilon}
-\end{equation}
-其中，$\epsilon$ 是一个微小的常量（本系统取 $10^{-6}$），用于在物理计算中防止除以零导致的硬件异常。
-SVGF 的所有核心环节——包括时域累积与五级 A-Trous 滤波——均仅针对该纯净的辐照度信号 $E_{raw}$ 进行平滑处理。由于辐照度通常具有较低的局部空间频率（光照在宏观表面上倾向于连续变化），滤波器可以在不破坏物体特征的前提下，使用较大的内核半径进行强力降噪。
-
-\subsection{多材质通道的重调制（Remodulation）}
-在管线的末端，平滑后的辐照度信号 $\bar{E}$ 会与保留了完整细节的反照率重新结合。这一策略确保了即便在降噪力度极强的情况下，物体的细微划痕、法线贴图带来的凹凸细节依然能够 100\% 地呈现在最终画面中。这种基于频率解耦的架构，是混合渲染系统在极低采样率下依然能保持工业级清晰度的关键工程手段。
-
-\section{亚像素级时域重投影与累积机制}
-
-时域累积（Temporal Accumulation）是 SVGF 算法能够大幅降低蒙特卡洛方差的核心基石。其基本理论假设是：在相邻两帧之间，场景中的光照分布具有高度的空间与时间连贯性。通过将历史样本映射至当前帧，系统可以在不增加射线发射数量的前提下，实质性地提升单个像素的有效采样数（Effective SPP）。
-
-\subsection{基于运动矢量的历史溯源}
-寻找当前像素 $p$ 在上一帧的物理位置是重投影的核心。根据第四章 \ref{sec:gbuffer_impl} 节推导的世界空间坐标重建模型，本系统通过读取 G-Buffer 中的运动矢量 $V_{motion}$，计算上一帧的查找坐标 $uv_{prev}$：
-\begin{equation}
-uv_{prev} = uv_{curr} - V_{motion}
-\end{equation}
-为了获得更高的重构精度，系统在采样历史缓冲时采用了双线性插值（Bilinear Interpolation）技术，这有效地避免了在物体移动时产生的阶梯状走样。
-
-\subsection{严苛的历史样本有效性校验（Validity Checks）}
-重投影并非简单的历史合并，由于场景中存在遮挡改变（Occlusion）、光源移动以及物体移出视锥等情况，直接使用历史像素会导致严重的拖影（Ghosting）。本系统引入了双重一致性校验机制：
-\begin{enumerate}
-    \item \textbf{深度偏差测试}：系统对比当前帧深度 $z_{curr}$ 与重投影位置的历史深度 $z_{prev}$。若两者差异超过预设阈值（基于第四章推导的线性深度比较），则判定发生了遮挡改变，当前像素将丢弃历史累积。
-    \item \textbf{法线一致性测试}：通过计算当前法线 $n_{curr}$ 与历史法线 $n_{prev}$ 的点积：
-    \begin{equation}
-    Validation_{normal} = (n_{curr} \cdot n_{prev} > \tau_{n})
-    \end{equation}
-    其中 $\tau_{n}$ 通常取 0.9。该测试确保了当几何体发生剧烈旋转或表面转折时，光照信号不会发生跨表面的错误渗色。
-\end{enumerate}
-
-\subsection{动态混合因子与累积权重演变逻辑}
-在通过校验后，系统采用指数移动平均（EMA）模型更新光照状态。混合因子 $\alpha$ 的选取决定了“收敛速度”与“残留噪声”之间的权衡：
-\begin{equation}
-S_t = \alpha S_{raw} + (1 - \alpha) S_{t-1}, \quad \alpha = \max(\alpha_{min}, \frac{1}{N_{history}})
-\end{equation}
-其中，$N_{history}$ 为该像素成功累积的连续帧数。随着渲染帧数增加，$\alpha$ 逐渐减小至极低值（如 0.05），系统进入稳定收敛状态，从而获得极佳的图像平滑度。
-
-\section{基于方差导引的边缘保留滤波实现}
-
-尽管时域累积能有效降低随机噪声，但在光照剧烈变化或物体快速运动的区域，历史信息的失效会导致残余噪点。为此，SVGF 算法引入了方差引导的 A-Trous 空域滤波器。
-
-\subsection{基于矩累积的逐像素方差估计}
-为了让滤波器感知噪点的分布，本系统在执行时域更新的同时，维护了光照信号的一阶矩 $E[L]$ 与二阶矩 $E[L^2]$。当前像素的原始方差 $\sigma^2_{raw}$ 可通过平方的期望与期望的平方之差求得：
-\begin{equation}
-\sigma^2_{raw}(p) = \max(0, E[L^2] - (E[L])^2)
-\end{equation}
-由于 1 SPP 的原始信号波动剧烈，系统在进入 A-Trous 迭代前，对 $\sigma^2_{raw}$ 执行了一轮 $3 \times 3$ 的盒式模糊，从而获得更具鲁棒性的空间方差估计 $\bar{\sigma}^2$。
-
-\subsection{A-Trous 小波变换与联合权重函数}
-A-Trous 滤波器采用空洞卷积的思想。在每一轮迭代 $i$ 中，采样点的偏移步长为 $2^i$。系统为每一个邻域点 $q$ 计算基于法线 ($w_n$)、深度 ($w_z$) 和亮度 ($w_l$) 的联合权重：
-\begin{equation}
-w(p, q) = w_{n}(p, q) \cdot w_{z}(p, q) \cdot w_{l}(p, q)
-\end{equation}
-其中亮度权重 $w_l$ 由上一小节计算的标准差 $\bar{\sigma}$ 动态控制，实现了“噪点多处强力平滑，细节多处精细保留”的自适应滤波效果。
-
-\section{TAA 时域抗锯齿稳定性增强技术}
-
-尽管 SVGF 能够显著降低光照噪点，但由于光栅化管线的离散采样特性，几何边缘依然存在明显的锯齿走样。本系统集成了时域抗锯齿（Temporal Anti-Aliasing, TAA）技术。
-
-\subsection{基于 Halton 序列的亚像素抖动采样}
-本系统在投影矩阵中引入了基于 Halton(2, 3) 序列的抖动偏移 $J$。Halton 序列作为一种低差异序列，具有极其均匀的空间分布特性。每一帧的抖动量 $J$ 会根据当前帧索引在序列中循环选取，确保了采样分布的时域稳定性。
-
-\subsection{基于邻域方差的 AABB 色彩裁剪（Color Clipping）}
-为了消除动态场景中的重影伪影，系统在 YCoCg 空间下执行色彩裁剪。系统在当前像素的 $3 \times 3$ 邻域内计算均值 $\mu$ 与标准差 $\sigma$，并构建置信区间：
-\begin{equation}
-[C_{min}, C_{max}] = [\mu - k\sigma, \mu + k\sigma]
-\end{equation}
-随后，系统将重投影获取的历史颜色强制裁剪（Clip）至该区间内。这一步骤在数学上保证了历史样本不会包含当前像素邻域内不存在的颜色，从而彻底消除了拖影。
-
-\section{降噪效果评估与性能开销分析}
-
-在主流 GPU 上针对 1080P 分辨率的测试数据显示，完整的 SVGF 降噪流水线耗时约为 2.4ms。考虑到 60 FPS 的预算，其 15\% 的性能开销换取了接近 512 SPP 的画质提升，具备极佳的工程性价比。
-
-\section{光照信号合成与最终画面输出}
-\label{sec:composition_impl}
-
-在所有处理完成后，渲染管线进入合成阶段（Composition Pass）。
-
-\subsection{物理重调制（Remodulation）逻辑}
-系统读取降噪后的纯净光照图 $\bar{E}$ 与 G-Buffer 中的原始反照率 $Albedo_{g}$，执行物理重调制：
-\begin{equation}
-L_{final} = \bar{E} \cdot Albedo_{g} + L_{emissive}
-\end{equation}
-这一步确保了场景中所有精细纹理能够与平滑的光影完美结合。
-
-\subsection{HDR 范围压缩与 ACES 色调映射}
-本系统集成了电影工业级的 ACES 色调映射算法。通过非线性的压缩曲线，系统在保留极高亮度区域色彩过渡的同时，极大地增强了画面的电影感。最终，经过色调映射后的信号被提交至 Vulkan 交换链显示。
+\subsection{ACES 色调映射与色彩校正}
+采用电影级 ACES 拟合曲线，配合 $1/2.2$ 的 Gamma 校正，将物理线性的 HDR 数值映射到符合人类视觉感知的 LDR 色彩空间。
 
 \section{本章小结}
-本章详细探讨了混合渲染管线中时空降噪与抗锯齿的工程实现。通过反照率解耦保护纹理，利用亚像素重投影实现历史溯源，并引入方差引导的 A-Trous 滤波器。最后，通过 TAA 技术与 ACES 合成输出，系统实现了在主流 GPU 上输出平稳、锐利且物理正确的高质量图像。
+本章完成了 Chimera 引擎核心算法层的落地。通过将反照率解耦的 SVGF 算法与基于色彩裁剪的 TAA 方案相结合，成功克服了 1 SPP 采样率下的信号质量瓶颈。配合最终的 HDR 后处理流水线，系统实现了从原始物理计算到高质量视觉图像的完整闭环。

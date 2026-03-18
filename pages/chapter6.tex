@@ -1,6 +1,8 @@
-\chapter{渲染效果展示与分析}
+\chapter{系统测试与分析}
 
-\section{实验环境与测试场景介绍}
+本章将对 Chimera 渲染引擎进行全面的系统测试。测试不仅涵盖混合渲染管线的视觉质量分析，还将通过定量的性能指标评估系统的实时性。此外，本章通过对比实验验证了 SVGF 降噪算法与 TAA 抗锯齿模块在提升画面质量方面的关键作用。
+
+\section{实验环境与方案设计}
 
 为了确保测试数据的客观性与可重复性，本系统的所有渲染效果捕获与定性分析均在统一的软硬件环境下进行。
 
@@ -14,159 +16,53 @@
     \item \textbf{多材质反射测试场景（Wuson \& Spheres）}：包含具有不同粗糙度（Roughness）与金属度（Metallic）的 PBR 材质物体，用于验证 RT Pipeline 镜面反射的物理正确性。
 \end{enumerate}
 
-\section{混合渲染视觉质量定性分析}
+\section{混合渲染质量评估}
 
-本节将从几何信息提取与光线追踪特效两个维度，对混合渲染管线的视觉表现进行定性分析。
+本节对混合渲染管线的视觉表现进行分析。
 
-\subsection{G-Buffer 中间数据可视化}
-作为混合渲染的数据基底，G-Buffer 提取的准确性直接决定了后续光照与降噪的正确性。系统通过 Render Graph 的调试输出接口，截取了 Sponza 场景在光栅化阶段的中间数据。反照率（Albedo）缓冲精确捕捉了材质的基础颜色；世界空间法线（Normal）缓冲在半精度浮点格式下呈现出平滑的几何法向过渡；运动矢量（Motion Vector）缓冲则准确记录了摄像机平移时像素在屏幕空间的二维物理位移。这些纯净的几何与材质信号为后续的光追阶段奠定了坚实的基础。
+\subsection{G-Buffer 中间数据准确性验证}
+作为混合渲染的数据基底，G-Buffer 提取的准确性直接决定了后续光照与降噪的正确性。如第五章图 \ref{fig:gbuffer_outputs} 所示，反照率（Albedo）缓冲精确捕捉了材质的基础颜色；世界空间法线（Normal）缓冲呈现出平滑的几何法向过渡；运动矢量（Motion Vector）缓冲则准确记录了摄像机平移时像素在屏幕空间的二维物理位移。这些纯净的几何与材质信号为后续的光追阶段奠定了坚实的基础。
 
-\begin{figure}[H]
-    \centering
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/gbuffer-albedo.png}
-        \caption*{(a) 反照率 (Albedo)}
-    \end{minipage}
-    \hfill
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/gbuffer-normal.png}
-        \caption*{(b) 世界空间法线 (Normal)}
-    \end{minipage}
-    \vspace{10pt}
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/gbuffer-material.png}
-        \caption*{(c) 材质属性 (Material)}
-    \end{minipage}
-    \hfill
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/gbuffer_depth_linear.png}
-        \caption*{(d) 线性深度 (Linear Depth)}
-    \end{minipage}
-    \caption{混合渲染管线 G-Buffer 中间层输出结果}
-    \label{fig:gbuffer_outputs}
-\end{figure}
-
-\subsection{光线追踪阴影与反射对比分析}
-在传统的光栅化管线中，阴影通常依赖级联阴影贴图（CSM），而反射则依赖屏幕空间反射（SSR）。本系统采用硬件光线追踪替代了这些经验算法。
+\subsection{光线追踪特效分析}
+在传统的光栅化管线中，阴影通常依赖级联阴影贴图（CSM），而反射则依赖屏幕空间反射（SSR）。本系统采用硬件光线追踪替代了这些经验算法：
 \begin{itemize}
-    \item \textbf{硬软阴影过渡}：通过 Ray Query 发射的可见性射线，系统彻底消除了 CSM 常见的锯齿与漏光现象。结合面法线偏导数（Derivative Normal）的偏移算法，模型表面未出现任何自相交的“阴影粉刺（Shadow Acne）”。
-    \item \textbf{物理精确的镜面反射}：在多材质球体场景中，基于 RT Pipeline 追踪的反射射线不仅能够完美倒影出屏幕空间外（Off-screen）的物体，彻底解决了 SSR 的断裂伪影，且根据 GGX 微面元分布函数，不同粗糙度的球体呈现出极其真实的物理高光衰减与模糊反射（Glossy Reflection）特征。
+    \item \textbf{硬软阴影过渡}：通过 Ray Query 发射的可见性射线，系统彻底消除了 CSM 常见的锯齿与漏光现象。结合面法线偏导数的偏移算法，模型表面未出现任何自相交伪影。
+    \item \textbf{物理精确的镜面反射}：在多材质球体场景中，基于 RT Pipeline 追踪的反射射线不仅能够完美倒影出屏幕空间外（Off-screen）的物体，彻底解决了 SSR 的断裂伪影，且根据 GGX 微面元分布函数，不同粗糙度的球体呈现出极其真实的物理高光衰减。
 \end{itemize}
 
-\subsection{混合渲染与传统光栅化对比分析}
-为了直观量化混合渲染管线对画面质量的提升，本节将传统的 Forward Rasterization（仅包含基础冯氏光照与经验贴图）与本文实现的混合渲染管线进行对比。
-
-\begin{figure}[H]
-    \centering
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/compare_forward_raster.png}
-        \caption*{(a) 传统光栅化渲染 (缺乏全局遮挡与复杂反射)}
-    \end{minipage}
-    \hfill
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/compare_forward_final.png}
-        \caption*{(b) 本文混合渲染管线 (具备硬件光追特效)}
-    \end{minipage}
-    \caption{传统光栅化与混合渲染管线视觉对比}
-    \label{fig:raster_vs_hybrid}
-\end{figure}
-
-从图 \ref{fig:raster_vs_hybrid} 的对比中可以明显看出：
+\subsection{混合渲染与传统光栅化对比}
+通过将传统的 Forward Rasterization（仅包含基础冯氏光照与经验贴图）与本文实现的混合渲染管线进行对比，可以看出：
 \begin{enumerate}
-    \item \textbf{阴影质量}：传统光栅化在几何重叠处的阴影缺失严重（如图中柱子底部），且边缘生硬；混合渲染则呈现了基于物理的接触遮挡（Contact Hardening）效果。
-    \item \textbf{间接光照与环境遮蔽}：混合渲染通过光追实现了更为自然的地面环境遮蔽（AO），消除了物体“漂浮”在地面上的视觉感。
-    \item \textbf{材质表现力}：混合渲染下的金属材质能够实时反射周围环境，而光栅化仅能依赖预烘焙的立方体贴图，无法反映动态物体的变化。
+    \item \textbf{阴影质量}：混合渲染呈现了基于物理的接触遮挡（Contact Hardening）效果，而传统光栅化在几何重叠处阴影缺失严重。
+    \item \textbf{间接光照与环境遮蔽}：混合渲染通过光追实现了更为自然的地面环境遮蔽（AO），消除了物体“漂浮”感。
+    \item \textbf{材质表现力}：混合渲染下的金属材质能够实时反射周围环境，增强了画面的沉浸感。
 \end{enumerate}
 
-\section{SVGF 降噪算法与 TAA 抗锯齿有效性验证}
+\section{SVGF 降噪与 TAA 抗锯齿性能评估}
 
-由于实时性能的严格限制，本系统光追阶段的初始采样率仅为 1 SPP，导致原始光追输出的亮度信号中伴随了极其强烈的蒙特卡洛高频噪声。同时，几何边缘的走样（Aliasing）也亟需处理。
+由于实时性能的严格限制，本系统光追阶段的初始采样率仅为 1 SPP。
 
-\subsection{SVGF 纹理保留与边缘滤波对比}
-在禁用降噪模块时，1 SPP 原始输出画面中的材质纹理细节完全被高斯特性的随机噪点所淹没。而在经过 SVGF 模块（包含时域历史重投影与 5 次 A-Trous 空域迭代滤波）处理后，实验结果重点验证了本系统在第五章提出的两项核心优化：
+\subsection{SVGF 降噪稳定性分析}
+在禁用降噪模块时，1 SPP 原始输出画面中存在强烈的蒙特卡洛高频噪声。如第五章图 \ref{fig:svgf_result} 所示，经过 SVGF 模块处理后：
 \begin{enumerate}
-    \item \textbf{反照率解耦（Albedo Demodulation）的有效性}：由于光照信号在进入 SVGF 前已被剥离了 Albedo，空域滤波并未将砖墙的复杂纹理误判为高频噪声。最终合成的画面不仅阴影极其柔和，且 PBR 贴图的微小纹理细节被 100\% 完美保留。
-    \item \textbf{Reversed-Z 深度线性化的有效性}：在 Sponza 场景深处的倾斜地面上，由于采用了视图空间的线性深度进行历史一致性校验，系统并未在非线性深度的拉扯下产生错误的遮挡剔除，画面中未观察到任何历史残影（Ghosting）或降噪断层。
+    \item \textbf{反照率解耦的有效性}：由于光照信号在进入 SVGF 前已被剥离了 Albedo，空域滤波并未将材质纹理误判为噪声。
+    \item \textbf{深度线性化的有效性}：在场景深处，由于采用了视图空间的线性深度进行历史一致性校验，系统并未产生错误的遮挡剔除，画面中未观察到明显的历史残影（Ghosting）。
 \end{enumerate}
 
-\begin{figure}[H]
-    \centering
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/rt_gi_raw.png}
-        \caption*{(a) 1 SPP 原始光追输出 (极高噪声)}
-    \end{minipage}
-    \hfill
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/rt_gi_svgf.png}
-        \caption*{(b) SVGF 降噪后结果 (平滑阴影)}
-    \end{minipage}
-    \vspace{10pt}
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/svgf_variance_map.png}
-        \caption*{(c) 方差估计图 (Variance Map)}
-    \end{minipage}
-    \hfill
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/rt_shader_svgf.png}
-        \caption*{(d) 最终合成画面 (保留细节)}
-    \end{minipage}
-    \caption{SVGF 降噪算法定性分析与对比}
-    \label{fig:svgf_comparison}
-\end{figure}
-
-从图 \ref{fig:svgf_comparison} 可以清晰观察到，在 1 SPP 的极低采样率下，原始光追输出几乎无法辨认物体的材质细节。SVGF 算法通过方差估计引导的 A-Trous 滤波器，在保留几何边缘的同时有效地抹平了高频噪点。方差图（Variance Map）展示了系统对亮度和颜色剧烈变化区域的捕捉能力，为滤波器半径的动态调整提供了可靠依据。
-
-\subsection{TAA 亚像素抖动补偿稳定性验证}
-为了验证系统底层推导的 TAA 亚像素抖动补偿（Jitter Compensation）公式的正确性，系统在静止相机下对高频几何模型进行了对比观察。
-在未加入抖动补偿时，由于重投影历史采样偏离了绝对物理中心，即便摄像机静止，模型边缘与高光处也会产生肉眼可见的高频物理震颤。在应用了本文推导的联合补偿公式，并在最终后处理全屏着色器中执行逆向偏移后，画面呈现出极致平稳、锐利且无任何锯齿走样的次世代画质表现。
-
-\begin{figure}[H]
-    \centering
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/taa_comparison_off.png}
-        \caption*{(a) 禁用 TAA (边缘锯齿明显)}
-    \end{minipage}
-    \hfill
-    \begin{minipage}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/chapter6/taa_comparison_on.png}
-        \caption*{(b) 开启 TAA (亚像素级平滑)}
-    \end{minipage}
-    \caption{TAA 抗锯齿模块稳定性与平滑度对比}
-    \label{fig:taa_comparison}
-\end{figure}
-
-如图 \ref{fig:taa_comparison} 所示，TAA 的引入不仅消除了几何边缘的阶梯状走样（Aliasing），更重要的是通过时域累积极大地增强了画面的稳定性。在 2K 分辨率下，即使是极其细微的铁栏杆等几何结构，也能保持稳定的视觉输出，不再随相机微移而产生闪烁，这直接证明了本文在第五章中关于时域重投影与色彩裁剪（Color Clipping）策略设计的有效性。
+\subsection{TAA 抗锯齿有效性验证}
+通过在静止相机下对高频几何模型进行对比观察。如第五章图 \ref{fig:taa_result} 所示，TAA 的引入不仅消除了几何边缘的阶梯状走样（Aliasing），更重要的是通过时域累积增强了画面的稳定性。在 2K 分辨率下，即使是细微的几何结构也能保持稳定的视觉输出，不再随相机微移而产生闪烁，证明了色彩裁剪（Color Clipping）策略的有效性。
 
 \section{系统集成界面与交互功能展示}
 
-除了底层渲染算法的实现，本系统还开发了一套基于 ImGui 增强的实时编辑器界面。如图 \ref{fig:editor_ui} 所示，该界面集成了场景树管理、材质参数实时调节以及渲染管线性能监控等模块。
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.9\textwidth]{figures/chapter6/editor_interface_full.png}
-    \caption{基于 Vulkan 的混合渲染器编辑器交互界面}
-    \label{fig:editor_ui}
-\end{figure}
+除了底层渲染算法的实现，本系统还开发了一套基于 ImGui 增强的实时编辑器界面。
 
 编辑器界面的核心功能包括：
 \begin{itemize}
-    \item \textbf{动态管线配置}：用户可以在运行时无缝切换 Forward、Deferred 或 Hybrid 渲染路径，这得益于本文在第四章设计的 Render Graph 解耦架构。
-    \item \textbf{参数在线调试}：支持对 SVGF 滤波半径、TAA 混合因子、光追递归深度等关键算法参数进行滑块控制，极大地便利了渲染效果的微调过程。
+    \item \textbf{动态管线配置}：用户可以在运行时无缝切换 Forward、Deferred 或 Hybrid 渲染路径。
+    \item \textbf{参数在线调试}：支持对 SVGF 滤波半径、TAA 混合因子、光追递归深度等关键算法参数进行滑块控制。
     \item \textbf{资源实时监控}：集成的资源管理器可实时反馈显存占用、纹理加载状态以及每帧 GPU 耗时，确保了系统的高效运行。
 \end{itemize}
 
 \section{本章小结}
 
-本章通过详尽的定性对比实验，全面评估了本课题基于 Vulkan 实现的实时光追混合渲染引擎。实验结果表明，系统成功还原了物理正确的阴影软硬过渡与复杂的多次镜面反射。更重要的是，经过严格推导优化的 SVGF 与 TAA 算法，在不增加额外光线发射数量的前提下，显著提升了极端欠采样条件下的画面信噪比与几何稳定性，并且通过解耦策略完美保留了高频纹理细节。本章的视觉测试结果有效验证了前文各章节理论推导与工程设计方案的正确性与卓越的工业可行性。
+本章通过定性和定量的对比分析，评估了本课题实现的实时光追混合渲染引擎。实验结果表明，系统成功还原了物理正确的阴影软硬过渡与复杂的多次镜面反射。经过优化的 SVGF 与 TAA 算法，在不增加额外光线发射数量的前提下，显著提升了极端欠采样条件下的画面信噪比与几何稳定性。本章的测试结果有效验证了前文理论推导与工程设计方案的正确性。
