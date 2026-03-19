@@ -1,78 +1,237 @@
-\chapter{引擎架构与场景管理}
+\chapter{渲染器架构与基础框架设计}
 
-本章将详细介绍 Chimera 渲染引擎的底层基础设施构建过程，重点阐述其模块化分层架构、基于 GLTF 的场景管理方案，以及支持实时交互的摄像机系统。特别地，本章将深入推导作为实时渲染数学基石的空间变换（MVP）矩阵。
+本章将详细介绍 Chimera 渲染引擎的底层基础设施构建过程。首先从宏观视角阐述渲染器的基本定义及其在图形学系统中的位置，随后引出本项目参考的分层拓扑架构设计。本章还将深入探讨模块化分层系统、场景管理、资源调度以及交互式摄像机系统的实现细节，并总结项目所采用的技术栈。
 
-\section{引擎分层架构设计}
+\section{渲染器概述与设计哲学}
 
-为了提高代码的可修改性并降低耦合度，本项目将引擎划分为核心层与平台层两个主体部分，并采用静态库（Static Library）的形式封装渲染逻辑。
+\subsection{渲染的本质}
+渲染（Rendering）是三维计算机图形学中利用软件从三维模型生成二维图像的过程。在这一过程中，计算机需要对三维模型或场景进行一系列复杂的处理，包括建模、纹理映射、光照计算、投影变换以及视点变换等，最终在光栅化阶段生成像素阵列。
 
-\subsection{核心层 (Core Layer)}
-核心层负责处理与硬件平台无关的通用逻辑：
+渲染器（Renderer）是游戏引擎中最核心的子系统之一。它负责将抽象的游戏世界数据（如模型顶点、纹理采样器、光照参数等）转换为最终呈现在屏幕上的图像。从架构角度看，渲染器可以被理解为一种“翻译官”或“中间层”——它将游戏世界的逻辑状态翻译为 GPU 可执行的底层图形操作。
+
+\subsection{渲染器与游戏引擎的关系}
+相比于一个完整的游戏引擎，渲染器只是庞大系统架构中的一个子集。在本项目中，我剥离了与图形学研究无关的业务逻辑（Gameplay）、物理引擎和音频系统，专注于打造一个纯粹的渲染实验平台。
+
+然而，在底层架构上，高质量的渲染器与现代游戏引擎有着极高的相似度。即便不考虑游戏逻辑，一个完备的渲染器依然需要具备模型加载、资源管理、事件响应等基础功能。因此，在搭建 Chimera 时，我也参考了通用游戏引擎的工业级架构方案。
+
+\section{系统架构设计}
+
+\subsection{架构参考与静态库模式}
+本项目的架构设计深受 Jason Gregory 所著《游戏引擎架构》（Game Engine Architecture）的影响，并参考了 TheCherno 开发的 Walnut 引擎。
+
+在工程实现上，Chimera 采用了“引擎核心 + 沙盒应用”的分离模式：
 \begin{itemize}
-    \item \textbf{Layer 分层逻辑}：引入了 Overlay 和 Layer 的概念。渲染流程按层级顺序执行，而 UI 事件（如 ImGui 面板）则优先拦截输入。这种设计简化了调试界面与场景交互的冲突处理。
-    \item \textbf{资源抽象}：封装了纹理（Image）、缓冲区（Buffer）及着色器（Shader）等低级对象的生命周期管理。
-    \item \textbf{日志系统}：集成 spdlog，实现带颜色分级的多线程异步日志记录，辅助实时监控引擎状态。
+    \item \textbf{引擎核心 (Chimera)}：被编译为一个静态库（Static Library）。它封装了所有复杂的图形 API 调用和渲染调度逻辑。
+    \item \textbf{沙盒应用 (Sandbox)}：作为一个独立的的可执行项目，通过调用引擎库提供的 API 来编写具体的渲染指令。
 \end{itemize}
+这种设计为用户提供了一个不受干扰的开发环境。在 Sandbox 中，开发者可以像在成熟引擎中写脚本一样编写渲染代码，而无需关心底层的交换链管理或同步屏障。
 
-\subsection{平台层 (Platform Layer)}
-平台层直接与操作系统和图形 API 交互：
-\begin{itemize}
-    \item \textbf{Vulkan 环境初始化}：利用 volk 动态加载 API 入口，负责逻辑设备、交换链及验证层的配置。
-    \item \textbf{输入与窗口管理}：通过 GLFW 捕获原生窗口事件，并将其转发至核心层的 Layer 系统。
-\end{itemize}
-
-\section{场景管理与资源加载}
-
-本系统旨在处理复杂的 PBR 模型，因此在场景组织上采用了工业界的标准方案。
-
-\subsection{基于 GLTF 的模型加载}
-本项目采用 \texttt{cgltf} 库解析 GLTF 2.0 格式模型。加载流程不仅包括顶点属性（位置、法线、切线、UV）的提取，还涵盖了 PBR 材质参数（金属度、粗糙度贴图）的映射。
-为了优化 GPU 传输，所有几何数据在加载后会被合并到全局顶点和索引缓冲区中。
-
-\subsection{场景树与加速结构管理}
-场景由 \texttt{Scene} 类统一管理。为了支持光线追踪，场景树在每帧更新时会执行以下操作：
-\begin{enumerate}
-    \item 更新每个实体的世界变换矩阵。
-    \item 重新构建或更新顶层加速结构（TLAS）。每个渲染实例指向一个底层加速结构（BLAS），这种解耦允许在不重新扫描几何体的情况下实现物体的实时平移与旋转。
-\end{enumerate}
-
-\section{交互式摄像机系统与空间变换 (MVP)}
-
-摄像机系统是用户与虚拟场景交互的桥梁，其背后的数学核心是坐标空间的连续变换。
-
-\subsection{坐标空间变换流程}
-为了将三维模型渲染到二维屏幕，顶点必须经历从局部空间到标准化设备坐标（NDC）的变换序列。
+\subsection{五层分层拓扑架构}
+为了提高系统的可扩展性并降低模块间的耦合度，Chimera 采用了清晰的分层拓扑架构。整个引擎从顶层应用到底层硬件共划分为五个核心逻辑层：
 
 \begin{enumerate}
-    \item \textbf{模型变换 (Model Matrix)}：
-    将顶点从局部坐标系转换到世界坐标系。对于平移 $\vec{t}$、旋转 $R$ 和缩放 $S$，模型矩阵 $M = T \cdot R \cdot S$。
-    
-    \item \textbf{观察变换 (View Matrix)}：
-    建立以摄像机为原点的坐标系。给定摄像机位置 $\vec{p}$、目标点 $\vec{l}$ 和上向量 $\vec{u}$，通过 Gram-Schmidt 正交化构建视图矩阵 $V$，将世界坐标转换到观察空间。
-    
-    \item \textbf{投影变换 (Projection Matrix)}：
-    本系统采用透视投影，将视锥体内的几何体映射到裁剪空间。
-    \begin{equation}
-    P = \begin{bmatrix}
-    \frac{1}{aspect \cdot \tan(fov/2)} & 0 & 0 & 0 \\
-    0 & \frac{1}{\tan(fov/2)} & 0 & 0 \\
-    0 & 0 & \frac{f}{n-f} & \frac{nf}{n-f} \\
-    0 & 0 & -1 & 0
-    \end{bmatrix}
-    \end{equation}
+    \item \textbf{应用层 (Sandbox Layer)}：具体的沙盒应用入口。通过继承 \texttt{Application} 基类并挂载自定义的 \texttt{Layer}，开发者可以快速构建不同的渲染场景，实现业务逻辑与引擎核心的解耦。
+    \item \textbf{核心框架层 (Core Layer)}：
+    \begin{itemize}
+        \item \textbf{LayerStack}：支持“插拔式”的模块管理，如处理 3D 渲染的 \texttt{SceneLayer} 和处理 UI 的 \texttt{ImGuiLayer}。
+        \item \textbf{事件系统}：采用“从顶到底”的事件拦截机制，确保 UI 操作不会误触发场景交互。
+        \item \textbf{日志系统}：集成 \texttt{spdlog}，实现带颜色分级的异步日志记录，辅助实时监控引擎状态。
+    \end{itemize}
+    \item \textbf{场景与资源层 (Scene \& Assets Layer)}：
+    \begin{itemize}
+        \item \textbf{加速结构 (AS)}：负责实时更新光线追踪所需的 TLAS（顶层加速结构）和 BLAS（底层加速结构）。
+        \item \textbf{ResourceManager}：通过句柄（Handle）管理显存资源，并利用延迟销毁队列确保在 GPU 繁忙时不会误删资源。
+    \end{itemize}
+    \item \textbf{渲染调度层 (Renderer Layer)}：
+    \begin{itemize}
+        \item \textbf{RenderGraph}：核心调度中枢，通过 DAG（有向无环图）自动推断 Pass 间的依赖关系。
+        \item \textbf{资源抽象}：封装了纹理（Image）、缓冲区（Buffer）及着色器（Shader）等低级对象的生命周期。
+    \end{itemize}
+    \item \textbf{平台与硬件层 (Platform Layer)}：直接与操作系统交互。
+    \begin{itemize}
+        \item \textbf{Vulkan 环境}：利用 \texttt{volk} 动态加载 API 入口，负责逻辑设备、交换链及验证层的配置。
+        \item \textbf{窗口管理}：通过 \texttt{GLFW} 捕获原生输入事件并转发至核心层。
+    \end{itemize}
 \end{enumerate}
 
-\subsection{Reversed-Z 深度缓冲技术}
-在传统的透视投影中，深度值 $z$ 在近剪裁面附近变化剧烈，而在远景处精度极低，容易导致“深度冲突”（Z-fighting）。
-本系统在投影矩阵推导中采用了 **Reversed-Z** 技术，将近剪裁面映射为 $z=1.0$，远剪裁面映射为 $z=0.0$，并配合浮点深度缓冲。这种方案结合 $1/z$ 的非线性特性，使得整个视锥体内的深度精度分布趋于均匀。
+\section{模块化分层系统设计}
 
-\subsection{弧球 (Arcball) 相机交互算法}
-本系统实现了一套基于 Arcball 逻辑的编辑器相机。
+在复杂的实时渲染引擎开发中，降低系统耦合度与控制逻辑复杂度是首要任务。为此，Chimera 引入了源自 Hazel 引擎设计的“分层系统”（Layer System）。这一机制将渲染、逻辑更新与事件响应解构为多个独立的原子单元，极大地提升了代码的组织效率。
+
+\subsection{Layer 的抽象定义}
+Layer（层）是一个高度抽象的逻辑概念，它代表了引擎中负责特定呈现内容或逻辑的模块。在 Chimera 中，\texttt{Layer} 基类定义了四个核心生命周期钩子：
 \begin{itemize}
-    \item \textbf{旋转}：将鼠标在屏幕上的二维偏移映射到包围球面上，计算旋转四元数，实现围绕目标点的顺滑轨道飞行。
-    \item \textbf{平移与缩放}：根据相机到目标点的距离动态调整平移步长，确保在不同尺度下的操作一致性。
+    \item \textbf{OnAttach / OnDetach}：当层被推入或移出栈时触发，用于资源的初始化与释放。
+    \item \textbf{OnUpdate}：每帧执行一次，用于处理该层特有的逻辑更新（如相机移动、场景动画）。
+    \item \textbf{OnImGuiRender}：专门用于提交 ImGui 绘图指令，将调试 UI 与核心场景渲染逻辑分离。
+    \item \textbf{OnEvent}：接收来自应用层的分发事件，并根据逻辑决定是否拦截。
+\end{itemize}
+
+在实际工程中，我通常将系统划分为 \texttt{SceneLayer}（处理 3D 场景数据）和 \texttt{ImGuiLayer}（处理编辑器面板与性能监控）。这种划分使得我在修改 UI 布局时，完全不会干扰到核心渲染管线的执行。
+
+\subsection{LayerStack：层级管理与堆栈结构}
+为了高效管理这些层，引擎实现了 \texttt{LayerStack} 类。它在内部维护了一个连续的容器，并引入了“普通层（Layer）”与“覆盖层（Overlay）”的区分：
+\begin{itemize}
+    \item \textbf{普通层 (Layer)}：按照添加顺序存储在容器的前半部分。例如，底层的环境背景层先添加，上层的模型层后添加。
+    \item \textbf{覆盖层 (Overlay)}：始终被维护在容器的最末端。它们通常具有最高优先级，用于显示始终置顶的调试信息、性能 Overlay 或全局弹出通知。
+\end{itemize}
+
+\subsection{执行序与事件拦截：双向流动机制}
+分层系统的核心精髓在于其对渲染流与事件流的差异化处理：
+
+\begin{enumerate}
+    \item \textbf{渲染流（从底向上，Bottom-to-Top）}：在 \texttt{OnUpdate} 阶段，引擎从 \texttt{LayerStack} 的最底层（索引 0）开始遍历。这样做可以确保背景先绘制，模型次之，最后是覆盖在最上方的 UI 界面。这种正向遍历符合图形学的深度覆盖逻辑。
+    \item \textbf{事件流（从顶向下，Top-to-Bottom）}：当鼠标点击或按键触发时，事件分发器会从最顶层的 Overlay 开始倒序遍历（从栈顶到栈底）。
+\end{enumerate}
+
+这种“从顶向下”的事件传递机制实现了关键的\textbf{事件拦截（Event Interception）}。例如，当用户点击 ImGui 面板上的一个按钮时，顶层的 \texttt{ImGuiLayer} 会捕获该点击事件并将其标记为“已处理（Handled）”。此时，下层的 \texttt{SceneLayer} 将不再收到该事件，从而有效避免了“穿透点击”现象——即在操作 UI 菜单时意外触发了场景中物体的选择或移动。
+
+\subsection{事件驱动与输入轮询机制}
+
+为了实现平滑且高性能的交互响应，Chimera 引擎设计了一套结合“事件驱动（Event-Driven）”与“输入轮询（Input Polling）”的混合交互架构。
+
+\subsubsection{事件系统（Event System）}
+事件系统主要用于处理“一次性”的动作，如窗口缩放、鼠标点击或按键按下。所有事件类均继承自 \texttt{Event} 基类，并按功能划分为 \texttt{KeyEvent}、\texttt{MouseEvent} 与 \texttt{ApplicationEvent} 等类别。
+
+事件处理的核心中枢是 \texttt{EventDispatcher}（事件分发器）。它的本质是一个基于模板的路由机制：
+\begin{itemize}
+    \item \textbf{按需拦截}：分发器通过 \texttt{Dispatch<T>} 方法尝试将通用事件匹配为特定类型（如 \texttt{MouseScrolledEvent}）。
+    \item \textbf{消耗机制}：与之绑定的回调函数会返回一个布尔值。如果返回 \texttt{true}，则表示该事件已被当前 Layer “消耗（Consume）”，分发过程立即停止。
+\end{itemize}
+
+如前文所述，事件流遵循“从顶向下”的穿透逻辑。位于栈顶的 Overlay（如 UI 界面）最先获得处理事件的机会。这种设计确保了 UI 能够优先截获输入，防止点击 UI 按钮时意外触发场景中相机的旋转，从而完美解决了“事件穿透”导致的冲突问题。
+
+\subsubsection{输入轮询（Input Polling）}
+虽然事件系统能够精准捕获动作，但对于需要“连续平滑响应”的交互（如 WASD 相机漫游），纯事件驱动往往会受限于操作系统的按键重复延迟（Key Repeat Delay），产生明显的顿挫感。
+
+为此，引擎引入了输入轮询机制。通过静态类 \texttt{Input}，系统可以直接查询当前硬件的瞬时状态：
+\begin{itemize}
+    \item \textbf{主动查询}：在 \texttt{OnUpdate} 逻辑中，代码可以直接调用 \texttt{Input::IsKeyPressed(Key::W)}。
+    \item \textbf{状态同步}：该接口本质上是对底层 GLFW 输入状态的封装，能够以与帧率同步的频率获取输入，从而实现无延迟的平滑移动体验。
+\end{itemize}
+
+综上所述，事件系统负责“决策与切换”（如切换渲染路径、开关 TAA），而输入轮询负责“连续交互与操作”。两者的结合使得 Chimera 能够同时具备响应的精确性与操作的丝滑感。
+
+\section{程序入口与主循环}
+
+\subsection{入口点设计}
+Chimera 使用了游戏开发中经典的入口点（Entry Point）模式。开发者不需要编写 \texttt{main} 函数，而是通过宏定义将自定义的 \texttt{Application} 子类注入引擎。
+
+\subsection{游戏循环 (Game Loop)}
+在 \texttt{Application::Run()} 方法中，引擎维持着一个高效的死循环。每一帧的操作严格遵循以下序：
+\begin{enumerate}
+    \item \textbf{获取步长}：计算两帧之间的时间差（Timestep），用于物理平滑交互。
+    \item \textbf{事件轮询}：通过操作系统获取最新的鼠标和键盘状态。
+    \item \textbf{层级更新}：遍历 \texttt{LayerStack}，执行每一层的 \texttt{OnUpdate} 逻辑。
+    \item \textbf{渲染提交}：调用 \texttt{Renderer} 提交当前帧的绘制命令缓冲。
+    \item \textbf{UI 渲染}：在场景渲染完成后，叠加 ImGui 调试界面。
+\end{enumerate}
+
+\section{资源抽象与句柄管理系统}
+
+在 Vulkan 这种显式图形 API 中，资源管理（显存分配、生命周期追踪与描述符绑定）是渲染器开发中最具挑战性的模块。为了确保系统的健壮性并降低 CPU 端的调度开销，Chimera 实现了一套高度抽象的“句柄化资源调度系统”。
+
+\subsection{资源句柄化与虚拟化 (Resource Handle)}
+为了规避 C++ 原始指针带来的悬空指针风险与显存泄露问题，引擎引入了句柄化访问模式。逻辑层不再直接持有 \texttt{VkBuffer} 或 \texttt{VkImage}，而是通过轻量级的 \texttt{TextureHandle}、\texttt{MaterialHandle} 等句柄进行索引。
+
+这一设计的核心价值在于：
+\begin{itemize}
+    \item \textbf{地址隔离}：\texttt{ResourceManager} 内部维护着连续的资源池。即便底层物理资源因动态扩容或内存整理而发生位移，上层逻辑层持有的句柄 ID 依然保持不变，实现了逻辑引用与物理地址的解耦。
+    \item \textbf{类型安全}：通过强类型的句柄包装，系统能在编译期拦截错误的资源操作（如将材质句柄误传给纹理采样函数）。
+\end{itemize}
+
+\subsection{基于 VMA 的显存池化管理}
+在底层显存分配上，本项目集成了 AMD 开发的 \texttt{Vulkan Memory Allocator (VMA)}。
+由于 Vulkan 物理设备对内存分配次数有严格限制（通常仅为 4096 次），直接为每个纹理调用 \texttt{vkAllocateMemory} 会迅速耗尽系统资源。VMA 通过在大块预分配内存（Heap）上进行子分配（Sub-allocation）和碎片整理，实现了高效的显存池化管理。Chimera 将其封装在 \texttt{Buffer} 与 \texttt{Image} 类中，极大地简化了 Staging Buffer 的创建与数据同步流程。
+
+\subsection{基于 Bindless 思想的全局描述符绑定}
+为了支持百万级面片与海量纹理的实时混合渲染，Chimera 采用了现代化的 **Bindless** 资源绑定架构：
+\begin{enumerate}
+    \item \textbf{材质存储缓冲区 (SSBO)}：\texttt{ResourceManager} 会将场景中所有材质的 PBR 参数（颜色、金属性、纹理索引等）打包成一个连续的 \texttt{GpuMaterial} 数组，并通过 \texttt{SyncMaterialsToGPU} 一次性上传至全局存储缓冲区。
+    \item \textbf{全局纹理数组}：引擎维护了一个巨大的描述符数组（Descriptor Array），将场景中所有的纹理视图（ImageView）一次性绑定至全局 Descriptor Set。
+\end{enumerate}
+在着色器中，程序不再需要频繁切换纹理绑定点，而是通过材质结构体中存储的索引值，直接在全局数组中访问对应的纹理。这种设计彻底消除了光栅化时代“一个物体一个 Draw Call”的性能瓶颈。
+
+\subsection{延迟销毁队列 (Deletion Queue)}
+Vulkan 严禁在 GPU 仍在执行渲染指令时销毁其引用的资源。为了解决 CPU-GPU 异步导致的资源竞争问题，Chimera 实现了一套延迟销毁机制（Deletion Queue）：
+当用户请求释放某个资源时，\texttt{ResourceManager} 并不会立即调用销毁函数，而是将其推入队列并标记当前的帧序号。系统会等待两到三帧（对应双重或三重缓冲的完整循环）后，确保 GPU 已经彻底释放了对该资源的引用，才会执行最终的物理清理。这一机制是引擎能够稳定运行、不发生显存溢出的关键保障。
+
+\section{场景组织与硬件加速结构维护}
+
+如果说资源系统提供了渲染的“砖块”，那么场景系统则定义了“建筑的拓扑结构”。在实时光线追踪背景下，传统的空间划分方案（如八叉树或 BSP 树）因其结构僵硬且 CPU 维护开销大，已逐渐被更适合 GPU 遍历的层次包围盒（BVH）所取代。
+
+\subsection{实体-组件式的场景结构}
+为了兼顾开发灵活性与运行效率，Chimera 的场景层采用了轻量级的组件化设计：
+\begin{itemize}
+    \item \textbf{Entity（实体）}：场景中的基本逻辑单元，持有一个全局唯一的 ID。
+    \item \textbf{TransformComponent}：负责维护物体的 4x4 TRS 变换矩阵，并追踪“前一帧变换（Previous Transform）”，为 TAA 和运动模糊提供关键的运动矢量数据。
+    \item \textbf{MeshComponent}：作为几何体载体，持有关联的 \texttt{Model} 句柄，实现了几何数据与逻辑实体的解耦。
+\end{itemize}
+
+\subsection{基于 GLTF 的场景导入流水线}
+场景的数据驱动主要通过 GLTF 2.0 格式实现。本项目利用 \texttt{cgltf} 库实现了对模型层级（Node Hierarchy）的深度解析。加载流程不仅提取顶点数据，还递归地计算节点间的父子变换关系，最终构建出一棵符合物理逻辑的场景树。
+
+\subsection{硬件加速的层次包围盒（BVH）架构}
+为了支撑百万级面片的实时光线追踪，\texttt{Scene} 类最核心的职责是维护一套符合 Vulkan KHR 规范的双层加速结构（Acceleration Structure）：
+
+\begin{enumerate}
+    \item \textbf{底层加速结构 (BLAS)}：对应单个模型的 BVH。在模型加载时，驱动程序根据原始三角形的 AABB 自动构建最优的二叉树结构。BLAS 存储在显存中，作为静态的几何描述符。
+    \item \textbf{顶层加速结构 (TLAS)}：对应整个场景的 BVH。它本质上是一个轻量级的“实例引用表（Instance List）”。
+\end{enumerate}
+
+这种“两层拓扑”的设计实现了极高的更新效率：当场景中的物体（Entity）发生平移或旋转时，其内部的几何细节（BLAS）无需变动，引擎只需在 \texttt{Scene::UpdateTLAS} 中更新对应的 4x4 变换矩阵并重构轻量级的 TLAS 节点。这种基于硬件加速的 BVH 遍历机制，使得射线与场景的求交测试（Ray-Box Intersection）能够完全由 GPU 的 RT Core 异步完成，大幅降低了 CPU 的调度负载。
+
+\section{交互式摄像机系统实现}
+
+在三维渲染中，摄像机（Camera）是用户观察虚拟世界的“眼睛”。然而，在底层图形学实现中，摄像机实体并不物理存在，它本质上是一系列坐标空间变换的数学抽象。
+
+\subsection{摄像机原理：操作倒转与观察空间}
+理解摄像机的核心在于“逆变换”逻辑。在虚拟世界中，我们习惯于认为相机在空间中移动，但在渲染流水线中，实际发生的是**整个场景相对于相机的反向运动**。
+
+例如，当用户指令相机向左移动时，渲染引擎实际上是将场景中所有的物体向右平移。这种将物体从世界空间（World Space）转换到观察空间（View Space）的变换矩阵被称为**观察矩阵（View Matrix）**。它代表了相机位置与姿态的逆矩阵，决定了我们如何“看待”这个场景。
+
+\subsection{透视投影与裁剪空间}
+为了将观察空间的三维数据映射到二维屏幕上，我们需要引入**投影矩阵（Projection Matrix）**。本项目主要采用透视投影（Perspective Projection），其核心参数包括：
+\begin{itemize}
+    \item \textbf{视场角（FOV）}：决定了视野的广度。较大的 FOV 会产生广角效果，增强透视感。
+    \item \textbf{纵横比（Aspect Ratio）}：视口的宽度与高度之比，确保图像不会因窗口拉伸而变形。
+    \item \textbf{近/远裁剪面（Near/Far Clip）}：定义了相机可观察的深度范围，超出此范围的几何体将被裁剪，以节省计算资源并防止深度冲突（Z-Fighting）。
+\end{itemize}
+
+\subsection{MVP 变换流水线}
+一个顶点从模型原始数据到最终屏幕像素，需要经过完整的 MVP 变换链：
+\begin{equation}
+    V_{clip} = P \cdot V \cdot M \cdot V_{local}
+\end{equation}
+其中：
+\begin{enumerate}
+    \item \textbf{模型矩阵 ($M$)}：通过平移、旋转、缩放（TRS）将顶点从局部坐标系转换到世界坐标系。
+    \item \textbf{观察矩阵 ($V$)}：将世界坐标系中的物体转换到以相机为原点的观察坐标系。
+    \item \textbf{投影矩阵 ($P$)}：应用透视除法，将坐标转换到归一化设备坐标（NDC）空间。
+\end{enumerate}
+
+\subsection{编辑器相机（EditorCamera）的交互实现}
+Chimera 实现了一套基于弧球（Arcball）逻辑的编辑器相机。与传统的 FPS 相机不同，它围绕一个**焦点（Focal Point）**进行观察。
+\begin{itemize}
+    \item \textbf{轨道飞行（Orbit）}：通过计算鼠标移动产生的偏航角（Yaw）和俯仰角（Pitch），结合四元数旋转，实现围绕目标的平滑旋转。
+    \item \textbf{自动缩放与平移}：根据相机到焦点的距离动态调整移动步长，确保在观察宏观场景或微观细节时都能保持一致的操作手感。
+\end{itemize}
+
+此外，为了适配 Vulkan 的坐标系规范，本系统在投影矩阵中修正了 Y 轴的方向，并采用了 Reversed-Z 技术（近平面映射为 1.0，远平面映射为 0.0），以利用浮点数在零点附近的更高精度，从而在渲染大规模场景时极大地缓解了深度冲突问题。
+
+\section{技术栈与构建方案}
+
+\subsection{构建系统：CMake}
+项目选择 \textbf{CMake} 作为构建系统。由于 Chimera 依赖大量的开源第三方库（如 GLFW, spdlog, GLM），CMake 的 \texttt{add\_subdirectory} 配合 \texttt{git submodule} 能够极大地简化依赖管理，并保证跨平台的编译一致性。
+
+\subsection{核心依赖库清单}
+\begin{itemize}
+    \item \textbf{Vulkan SDK 1.3}：提供现代化的硬件访问接口。
+    \item \textbf{volk}：Vulkan 的元装载器，用于动态获取函数指针。
+    \item \textbf{Dear ImGui}：用于构建实时调试面板。
+    \item \textbf{VMA}：由 AMD 提供的显存分配器，解决 Vulkan 原生内存分配次数受限的问题。
+    \item \textbf{cgltf}：轻量级 GLTF 2.0 解析器。
 \end{itemize}
 
 \section{本章小结}
-
-本章构建了 Chimera 引擎的架构骨架。通过分层设计实现了系统解耦，通过 GLTF 场景管理支撑了复杂模型的加载与光追加速结构的更新。最后，本章推导了 MVP 空间变换矩阵，并引入 Reversed-Z 技术优化了渲染精度。这些基础设施为下一章探讨 Render Graph 调度与核心渲染管线的实现提供了必要的前提。
+本章构建了 Chimera 引擎的架构骨架。通过五层分层架构实现了系统解耦，并确立了“引擎库 + 应用”的工程模式。这些基础设施——包括 Application 主循环、资源管理句柄以及交互式相机——为后续章节探讨复杂的混合渲染管线奠定了坚实的工程基础。
