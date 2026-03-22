@@ -1,46 +1,83 @@
-\chapter{渲染管线与物理渲染理论}
+% !Mode:: "TeX:UTF-8"
 
-本章主要阐述本系统实现的理论基础，包括渲染管线的演进逻辑、基于物理的渲染（PBR）数学模型以及现代图形 API 的架构特性。这些理论不仅定义了本系统“算什么”，更决定了在现代 GPU 架构下“怎么算”。
+\chapter{实时混合渲染理论基础}
+\label{chap:theory}
 
-\section{渲染管线的演进与对比}
+本章将阐述构建实时混合渲染引擎所需的理论基石。首先介绍基于物理的渲染（PBR）数学模型，随后探讨现代 Vulkan API 的显式驱动机制，最后详细解析硬件加速光线追踪的底层原理，为后续章节中渲染图架构与降噪算法的实现奠定理论基础。
 
-随着图形硬件算力的提升，实时渲染管线经历了从固定流水线到可编程流水线，再到如今光线追踪混合管线的重大变革。
+\section{基于物理的渲染（PBR）理论}
 
-\subsection{传统光栅化管线 (Rasterization)}
-光栅化是将三维几何体投影到二维屏幕并离散化为像素的过程。其核心优势在于极高的并行效率，但在处理全局光照效果（如软阴影、多次反射、环境遮蔽）时，由于缺乏场景的全局拓扑信息，往往需要依赖各种经验性的近似算法（如 Shadow Mapping, SSR），这些算法在复杂场景下极易产生视觉伪影。
+\subsection{微面元理论与 Cook-Torrance BRDF}
+% 核心点：解释材质表面如何与光交互
+为了模拟真实世界的材质表现，通常采用微面元模型（Microfacet Theory），假设表面由无数微小的镜面组成。微面曲面模型通常由给出微面法线 $n_f$ 关于曲面法线 $n$ 的分布函数来描述，如图 \ref{fig:microfacet_model} 所示。
 
-\subsection{实时混合渲染管线 (Hybrid Rendering)}
-本系统采用混合渲染路径（Hybrid Rendering Pipeline）。其基本思路是：利用光栅化管线的高效性处理场景的几何可见性（写入 G-Buffer），而将昂贵的光线发射过程仅用于处理最能提升画质的光影特效。这种“先栅后追”的策略，是在当前硬件条件下实现次世代画质与实时帧率平衡的最优方案。
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/chapter2/Microplane_reflection.png}
+    \caption{微面元模型示意图：(a) 微面法线变化越大，表面越粗糙；(b) 光滑表面的微面法线变化相对较小}
+    \label{fig:microfacet_model}
+\end{figure}
 
-\section{基于物理的渲染 (PBR) 理论}
-
-为了实现物理正确的材质表现，本系统严格遵循能量守恒定律与微面元模型。
-
-\subsection{渲染方程与能量守恒}
-所有光照计算的核心均围绕由 Kajiya 提出的渲染方程（The Rendering Equation）展开：
+其核心的双向反射分布函数（BRDF）采用 Cook-Torrance 模型：
 \begin{equation}
-    L_o(p, \omega_o) = L_e(p, \omega_o) + \int_{\Omega} f_r(p, \omega_i, \omega_o) L_i(p, \omega_i) (n \cdot \omega_i) d\omega_i
+    f_r(p, \omega_i, \omega_o) = \frac{D(h)F(v, h)G(l, v, h)}{4(n \cdot l)(n \cdot v)}
 \end{equation}
-其中，$f_r$ 为双向反射分布函数（BRDF），它定义了物体表面如何将入射光能重新分配到出射方向。能量守恒定律要求物体的反射总能量绝不能超过入射的总能量。
+其中，$D(h)$ 为法线分布函数（NDF），$F$ 为菲涅尔项（Fresnel），$G$ 为几何遮蔽项（Geometry）。本文重点讨论 Trowbridge-Reitz (GGX) 分布在实时渲染中的应用。
 
-\subsection{微面元模型与 Cook-Torrance BRDF}
-本系统将不透明物体表面建模为无数微小的镜面（Microfacets）。 Cook-Torrance BRDF 将反射分为漫反射（Lambertian）与镜面反射（Specular）两部分。镜面反射项由以下三个关键物理因子组成：
+\subsection{渲染方程与蒙特卡洛积分}
+% 核心点：全局光照的数学本质
+场景中任意点的出射辐亮度 $L_o$ 由 Kajiya 提出的渲染方程描述。在实时端，由于解析解难以求得，通常采用蒙特卡洛积分（Monte Carlo Integration）进行数值估算：
+\begin{equation}
+    E[f(x)] \approx \frac{1}{N} \sum_{i=1}^{N} \frac{f(x_i)}{p(x_i)}
+\end{equation}
+在 1 SPP（每像素一采样）下，如何通过重要性采样（Importance Sampling）降低方差是使用 Temporal 技术的好场景。
+
+\section{现代显式图形 API（Vulkan）架构}
+
+\subsection{显式资源管理与同步机制}
+% 核心点：Vulkan 相比 OpenGL 的核心优势
+不同于传统的图形学 API，Vulkan 是现代的图形学API，提供给用户更细致的权限，让开发者更细致的控制。
 \begin{itemize}
-    \item \textbf{法线分布函数 (D)}：描述微面元法线与半程向量对齐的概率，决定了高光斑的形状与锐利度。本系统采用 Trowbridge-Reitz GGX 分布。
-    \item \textbf{菲涅尔项 (F)}：描述光线以不同角度入射时的反射比例，模拟掠射角下的全反射现象。采用 Schlick 近似模型。
-    \item \textbf{几何遮蔽项 (G)}：描述微面元之间的相互遮掩（Masking）与阴影（Shadowing）效应，确保掠射角下的能量正确性。
+    \item \textbf{内存管理}：论述显存堆（Memory Heap）的手动分配与缓冲区（Buffer）/图像（Image）的绑定流程。
+    \item \textbf{同步与屏障}：分析 Pipeline Barrier 与 Render Pass 依赖如何解决 GPU 上的数据竞争（RAW/WAR/WAW）。
 \end{itemize}
 
-\section{现代图形 API 架构特性}
+\subsection{Vulkan 动态渲染}
+% 核心点：本项目用到的现代化特性
+本文利用了 Vulkan 1.3 引入的动态渲染（Dynamic Rendering）特性， 传统Vulkan渲染需要预先创建渲染通道(RenderPass)和帧缓冲(Framebuffer)对象，而动态渲染允许开发者直接在命令缓冲区中开始和结束渲染操作， 省去了传统的 Render Pass 对象创建，简化了渲染图（Render Graph）的节点构建流程，提高了管线切换的灵活性。
 
-本系统选择基于 Vulkan 1.3 开发，旨在利用其底层、显式且低开销的架构特性。
+\section{硬件加速光线追踪原理}
 
-\subsection{显式同步与资源管理}
-不同于旧式 API 的黑盒管理，Vulkan 要求开发者显式声明图像布局转换（Image Layout Transition）与执行屏障（Pipeline Barrier）。这种显式控制使得本系统实现的渲染图（Render Graph）模块能够精准地调度 GPU 任务，消除不必要的管线停顿（Stalls）。
+\subsection{层次包围盒（BVH）加速结构}
+% 核心点：AS 的层级结构
+为了实现高效的射线-几何体求交，现代 GPU 引入了双层加速结构（Acceleration Structures），其层级拓扑关系如图 \ref{fig:bvh_structure} 所示。
 
-\subsection{动态渲染与管线状态对象 (PSO)}
-为了最大化渲染效率，本系统将深度测试、混合模式等所有渲染状态预编译为管线状态对象（PSO）。此外，利用 Vulkan 1.3 的动态渲染（Dynamic Rendering）特性，本系统彻底摆脱了复杂的 Render Pass 与 Framebuffer 对象绑定，极大地提升了渲染逻辑的灵活性。
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/chapter2/bvh_structure_tlas_blas.png}
+    \caption{硬件加速的光线追踪双层包围盒（BVH）架构示意图}
+    \label{fig:bvh_structure}
+\end{figure}
 
-\section{本章小结}
+\begin{itemize}
+    \item \textbf{底层加速结构（BLAS）}：存储原始顶点数据与索引，负责局部的交点计算。驱动程序会根据几何体的拓扑结构自动构建最优的二叉树。
+    \item \textbf{顶层加速结构（TLAS）}：存储多个 BLAS 的实例引用（Instance）及其对应的 4x4 世界变换矩阵。这种解耦设计使得场景中物体的平移、旋转仅需重构轻量级的 TLAS，而无需改动庞大的顶点数据，从而支持了动态场景的实时渲染。
+\end{itemize}
 
-本章从渲染逻辑的演进出发，确立了混合渲染管线的技术路线；随后深入探讨了基于物理的渲染方程及其微面元实现模型，为后续着色器开发提供了数学指导；最后阐述了 Vulkan API 的核心特性，为底层的资源调度奠定了理论基础。关于如何利用硬件加速光线追踪的具体技术，将在第五章结合具体实现进一步展开。
+\subsection{光线追踪管线（RTP）与光线查询（Ray Query）}
+% 核心点：两种执行方式的区别
+Vulkan 
+\begin{itemize}
+    \item \textbf{RT Pipeline}：通过 RayGen、Miss、ClosestHit 等专用着色器阶段实现复杂的路径追踪逻辑。
+    \item \textbf{Ray Query}：允许在任意着色器阶段（如 Fragment Shader）发起射线探测，适用于混合渲染中的硬阴影与环境光遮蔽计算。
+\end{itemize}
+
+\section{混合渲染（Hybrid Rendering）逻辑流程}
+
+\subsection{延迟渲染与 G-Buffer 提取}
+% 核心点：管线的第一步
+混合渲染管线的第一阶段采用光栅化方式生成几何缓冲区（G-Buffer），提取场景的深度（Depth）、法线（Normal）、反照率（Albedo）及材质参数。这种方式减少了后续光线追踪管线的计算量，为后续光线追踪管线的计算提供了必要的信息。
+
+\subsection{基于空间与时域的信号重建}
+% 核心点：引出后续章节的 SVGF
+由于 1 SPP 的光追结果存在严重的统计噪声，必须结合 G-Buffer 提供的辅助信息进行信号重建。本文将利用 G-Buffer 中的运动矢量（Motion Vector）进行时域重投影，并通过空间域滤波器实现最终的平滑输出。

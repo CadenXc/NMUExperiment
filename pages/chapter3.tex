@@ -1,148 +1,179 @@
-\chapter{渲染器架构与基础框架设计}
+\chapter{渲染器架构}
 
-本章将详细介绍 Chimera 渲染引擎的底层基础设施构建过程。首先从宏观视角阐述渲染器的基本定义及其在图形学系统中的位置，随后引出本项目参考的分层拓扑架构设计。本章还将深入探讨模块化分层系统、场景管理、资源调度以及交互式摄像机系统的实现细节，并总结项目所采用的技术栈。
+本章将详细介绍 Chimera 渲染引擎的整体架构。首先从宏观视角阐述渲染器的基本定义及其在图形学系统中的位置，随后引出本项目参考的分层拓扑架构设计。本章还将深入探讨模块化分层系统、场景管理、资源调度以及交互式摄像机系统的实现细节，并总结项目所采用的技术栈。
 
-\section{渲染器概述与设计哲学}
+\section{渲染器概述}
 
-\subsection{渲染的本质}
-渲染（Rendering）是三维计算机图形学中利用软件从三维模型生成二维图像的过程。在这一过程中，计算机需要对三维模型或场景进行一系列复杂的处理，包括建模、纹理映射、光照计算、投影变换以及视点变换等，最终在光栅化阶段生成像素阵列。
+\subsection{渲染介绍}
 
-渲染器（Renderer）是游戏引擎中最核心的子系统之一。它负责将抽象的游戏世界数据（如模型顶点、纹理采样器、光照参数等）转换为最终呈现在屏幕上的图像。从架构角度看，渲染器可以被理解为一种“翻译官”或“中间层”——它将游戏世界的逻辑状态翻译为 GPU 可执行的底层图形操作。
+渲染（Rendering）是三维计算机图形学中用软件在平面上从三维模型、场景生成二维图像的过程，计算机需要对三维模型或场景进行处理，包括建模、纹理映射、光照计算等一系列计算，最终生成一张二维图像。
 
-\subsection{渲染器与游戏引擎的关系}
-相比于一个完整的游戏引擎，渲染器只是庞大系统架构中的一个子集。在本项目中，我剥离了与图形学研究无关的业务逻辑（Gameplay）、物理引擎和音频系统，专注于打造一个纯粹的渲染实验平台。
 
-然而，在底层架构上，高质量的渲染器与现代游戏引擎有着极高的相似度。即便不考虑游戏逻辑，一个完备的渲染器依然需要具备模型加载、资源管理、事件响应等基础功能。因此，在搭建 Chimera 时，我也参考了通用游戏引擎的工业级架构方案。
+渲染器（Renderer）是游戏引擎中最核心的子系统之一。它负责将抽象的游戏世界数据（如模型顶点、纹理采样器、光照参数等）转换为最终呈现在屏幕上的图像。它将游戏世界的逻辑状态翻译为 GPU 可执行的底层图形操作。
+
+在一个完整的游戏引擎，渲染器只是庞大系统架构中的很小的一部分，相比于游戏引擎，渲染器不用实现GamePlay层的以及与图形学研究无关的物理引擎和音频系统等, 但在底层架构上，渲染器与现代游戏引擎有着极高的相似度。一个完备的渲染器依然需要具备模型加载、资源管理、事件响应等基础功能。
 
 \section{系统架构设计}
 
-\subsection{架构参考与静态库模式}
-本项目的架构设计深受 Jason Gregory 所著《游戏引擎架构》（Game Engine Architecture）的影响，并参考了 TheCherno 开发的 Walnut 引擎。
+\subsection{架构总体介绍}
+在搭建渲染器时，我参考了 Walnut, 一个设计明晰，轻便的渲染引擎，在此基础上实现了RenderGraph管理的渲染层架构。
 
-在工程实现上，Chimera 采用了“引擎核心 + 沙盒应用”的分离模式：
+在工程实现上，把具体的渲染器库核心编译为一个静态库，实际的界面，渲染在Sandbox调用
 \begin{itemize}
-    \item \textbf{引擎核心 (Chimera)}：被编译为一个静态库（Static Library）。它封装了所有复杂的图形 API 调用和渲染调度逻辑。
-    \item \textbf{沙盒应用 (Sandbox)}：作为一个独立的的可执行项目，通过调用引擎库提供的 API 来编写具体的渲染指令。
+    \item \textbf{引擎核心}：被编译为一个静态库，封装了和抽象图形 API 调用和渲染调度逻辑，让渲染和用户的代码隔离。
+    \item \textbf{ Sandbox }：作为一个独立的的可执行项目，通过调用引擎库提供的 API 来编写具体的渲染指令，不需要知道底层的渲染逻辑。
 \end{itemize}
-这种设计为用户提供了一个不受干扰的开发环境。在 Sandbox 中，开发者可以像在成熟引擎中写脚本一样编写渲染代码，而无需关心底层的交换链管理或同步屏障。
+这样能给用户提供一个不受干扰的开发环境。在 Sandbox 中，用户专心写渲染代码，而无需关心底层的渲染实现。
 
 \subsection{五层分层拓扑架构}
-为了提高系统的可扩展性并降低模块间的耦合度，Chimera 采用了清晰的分层拓扑架构。整个引擎从顶层应用到底层硬件共划分为五个核心逻辑层：
+《游戏引擎架构》这本书里总结了游戏引擎的架构的分层，每层的功能职责。 为了提高系统的可扩展性并降低模块间的耦合度，本项目参考 Walnut采用了清晰的分层拓扑架构。整个引擎从顶层应用到底层硬件共划分为五个核心逻辑层，如图 \ref{fig:renderer_architecture} 所示。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/chapter3/renderer_architecture.png}
+    \caption{Chimera 引擎五层分层拓扑架构图}
+    \label{fig:renderer_architecture}
+\end{figure}
 
 \begin{enumerate}
-    \item \textbf{应用层 (Sandbox Layer)}：具体的沙盒应用入口。通过继承 \texttt{Application} 基类并挂载自定义的 \texttt{Layer}，开发者可以快速构建不同的渲染场景，实现业务逻辑与引擎核心的解耦。
+    \item \textbf{应用层 (Sandbox Layer)}：具体的沙盒应用入口。通过继承 \texttt{Application} 基类并挂载自定义的 \texttt{Layer}，开发者可以快速构建不同的渲染场景。
     \item \textbf{核心框架层 (Core Layer)}：
     \begin{itemize}
         \item \textbf{LayerStack}：支持“插拔式”的模块管理，如处理 3D 渲染的 \texttt{SceneLayer} 和处理 UI 的 \texttt{ImGuiLayer}。
         \item \textbf{事件系统}：采用“从顶到底”的事件拦截机制，确保 UI 操作不会误触发场景交互。
-        \item \textbf{日志系统}：集成 \texttt{spdlog}，实现带颜色分级的异步日志记录，辅助实时监控引擎状态。
+        \item \textbf{日志系统}：集成 \texttt{spdlog}，能在开发过程中让用快速定位错误。
     \end{itemize}
     \item \textbf{场景与资源层 (Scene \& Assets Layer)}：
     \begin{itemize}
         \item \textbf{加速结构 (AS)}：负责实时更新光线追踪所需的 TLAS（顶层加速结构）和 BLAS（底层加速结构）。
-        \item \textbf{ResourceManager}：通过句柄（Handle）管理显存资源，并利用延迟销毁队列确保在 GPU 繁忙时不会误删资源。
+        \item \textbf{ResourceManager}：资源管理类单例，利用延迟销毁队列确保在 GPU 繁忙时不会误删资源。
     \end{itemize}
     \item \textbf{渲染调度层 (Renderer Layer)}：
     \begin{itemize}
         \item \textbf{RenderGraph}：核心调度中枢，通过 DAG（有向无环图）自动推断 Pass 间的依赖关系。
-        \item \textbf{资源抽象}：封装了纹理（Image）、缓冲区（Buffer）及着色器（Shader）等低级对象的生命周期。
+        \item \textbf{资源抽象}：封装了纹理（Image）、缓冲区（Buffer）及着色器（Shader）等资源对象。
     \end{itemize}
     \item \textbf{平台与硬件层 (Platform Layer)}：直接与操作系统交互。
     \begin{itemize}
-        \item \textbf{Vulkan 环境}：利用 \texttt{volk} 动态加载 API 入口，负责逻辑设备、交换链及验证层的配置。
+        \item \textbf{Vulkan 环境}：利用 \texttt{volk} 动态加载 API 入口，并负责逻辑设备、交换链及验证层的Vulkan基本配置。
         \item \textbf{窗口管理}：通过 \texttt{GLFW} 捕获原生输入事件并转发至核心层。
     \end{itemize}
 \end{enumerate}
 
 \section{模块化分层系统设计}
 
-在复杂的实时渲染引擎开发中，降低系统耦合度与控制逻辑复杂度是首要任务。为此，Chimera 引入了源自 Hazel 引擎设计的“分层系统”（Layer System）。这一机制将渲染、逻辑更新与事件响应解构为多个独立的原子单元，极大地提升了代码的组织效率。
+介绍渲染器部分模块的设计。
 
-\subsection{Layer 的抽象定义}
-Layer（层）是一个高度抽象的逻辑概念，它代表了引擎中负责特定呈现内容或逻辑的模块。在 Chimera 中，\texttt{Layer} 基类定义了四个核心生命周期钩子：
+\subsection{Layer}
+\subsubsection{Layer}
+
+Layer（层）是一个高度抽象的逻辑概念，它是引擎的一部分，它用于呈现某些东西的内容并接收事件。在 Chimera 中，\texttt{Layer} 类层次结构如图 \ref{fig:layer_class_diagram} 所示：
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.4\textwidth]{figures/chapter3/layer_class_diagram.png}
+    \caption{Layer 抽象基类与具体实现类关系图}
+    \label{fig:layer_class_diagram}
+\end{figure}
+
 \begin{itemize}
     \item \textbf{OnAttach / OnDetach}：当层被推入或移出栈时触发，用于资源的初始化与释放。
-    \item \textbf{OnUpdate}：每帧执行一次，用于处理该层特有的逻辑更新（如相机移动、场景动画）。
+    \item \textbf{OnUpdate}：每帧执行一次，用于处理该层特有的逻辑更新（如相机移动、场景渲染）。
     \item \textbf{OnImGuiRender}：专门用于提交 ImGui 绘图指令，将调试 UI 与核心场景渲染逻辑分离。
-    \item \textbf{OnEvent}：接收来自应用层的分发事件，并根据逻辑决定是否拦截。
+    \item \textbf{OnEvent}：接收来自应用层的分发事件，并根据逻辑决定是否处理和拦截。
 \end{itemize}
 
-在实际工程中，我通常将系统划分为 \texttt{SceneLayer}（处理 3D 场景数据）和 \texttt{ImGuiLayer}（处理编辑器面板与性能监控）。这种划分使得我在修改 UI 布局时，完全不会干扰到核心渲染管线的执行。
+在本项目中，Layer用户可以在自己的项目里继承Layer类，搭建用于测试的窗口并实现自己的逻辑，所做的修改不会影响到核心逻辑。
 
-\subsection{LayerStack：层级管理与堆栈结构}
-为了高效管理这些层，引擎实现了 \texttt{LayerStack} 类。它在内部维护了一个连续的容器，并引入了“普通层（Layer）”与“覆盖层（Overlay）”的区分：
+\subsubsection{LayerStack：层级管理与堆栈结构}
+为了确保类的功能完整和正常的生命期，引擎实现了 \texttt{LayerStack} 类。它在内部维护了一个包含所有类的容器，按顺序执行类的接口
 \begin{itemize}
     \item \textbf{普通层 (Layer)}：按照添加顺序存储在容器的前半部分。例如，底层的环境背景层先添加，上层的模型层后添加。
     \item \textbf{覆盖层 (Overlay)}：始终被维护在容器的最末端。它们通常具有最高优先级，用于显示始终置顶的调试信息、性能 Overlay 或全局弹出通知。
 \end{itemize}
 
-\subsection{执行序与事件拦截：双向流动机制}
-分层系统的核心精髓在于其对渲染流与事件流的差异化处理：
+\subsection{事件驱动与输入轮询}
 
-\begin{enumerate}
-    \item \textbf{渲染流（从底向上，Bottom-to-Top）}：在 \texttt{OnUpdate} 阶段，引擎从 \texttt{LayerStack} 的最底层（索引 0）开始遍历。这样做可以确保背景先绘制，模型次之，最后是覆盖在最上方的 UI 界面。这种正向遍历符合图形学的深度覆盖逻辑。
-    \item \textbf{事件流（从顶向下，Top-to-Bottom）}：当鼠标点击或按键触发时，事件分发器会从最顶层的 Overlay 开始倒序遍历（从栈顶到栈底）。
-\end{enumerate}
-
-这种“从顶向下”的事件传递机制实现了关键的\textbf{事件拦截（Event Interception）}。例如，当用户点击 ImGui 面板上的一个按钮时，顶层的 \texttt{ImGuiLayer} 会捕获该点击事件并将其标记为“已处理（Handled）”。此时，下层的 \texttt{SceneLayer} 将不再收到该事件，从而有效避免了“穿透点击”现象——即在操作 UI 菜单时意外触发了场景中物体的选择或移动。
-
-\subsection{事件驱动与输入轮询机制}
-
-为了实现平滑且高性能的交互响应，Chimera 引擎设计了一套结合“事件驱动（Event-Driven）”与“输入轮询（Input Polling）”的混合交互架构。
+为了实现平滑且高性能的交互响应，本项目设计了一套结合“事件驱动（Event-Driven）”与“输入轮询（Input Polling）”的混合交互架构。
 
 \subsubsection{事件系统（Event System）}
 事件系统主要用于处理“一次性”的动作，如窗口缩放、鼠标点击或按键按下。所有事件类均继承自 \texttt{Event} 基类，并按功能划分为 \texttt{KeyEvent}、\texttt{MouseEvent} 与 \texttt{ApplicationEvent} 等类别。
 
-事件处理的核心中枢是 \texttt{EventDispatcher}（事件分发器）。它的本质是一个基于模板的路由机制：
+事件处理的核心中枢是 \texttt{EventDispatcher}（事件分发器），匹配输入和对应的回调函数。
 \begin{itemize}
     \item \textbf{按需拦截}：分发器通过 \texttt{Dispatch<T>} 方法尝试将通用事件匹配为特定类型（如 \texttt{MouseScrolledEvent}）。
-    \item \textbf{消耗机制}：与之绑定的回调函数会返回一个布尔值。如果返回 \texttt{true}，则表示该事件已被当前 Layer “消耗（Consume）”，分发过程立即停止。
+    \item \textbf{消耗机制}：与之绑定的回调函数会返回一个布尔值。如果返回 \texttt{true}，则表示该事件已被当前 Layer，后面层无需处理。
 \end{itemize}
 
-如前文所述，事件流遵循“从顶向下”的穿透逻辑。位于栈顶的 Overlay（如 UI 界面）最先获得处理事件的机会。这种设计确保了 UI 能够优先截获输入，防止点击 UI 按钮时意外触发场景中相机的旋转，从而完美解决了“事件穿透”导致的冲突问题。
+Layer 渲染和调事件的处理逻辑相反。渲染从下往上绘制，事件从上往下处理。比如我选中的是最上面的调试按键，那么就不会由下一层处理，而渲染会从下往上绘制。
+\begin{enumerate}
+    \item \textbf{渲染流（从底向上，Bottom-to-Top）}：在 \texttt{OnUpdate} 阶段，引擎从 \texttt{LayerStack} 的最底层（索引 0）开始遍历。这样做可以确保背景先绘制，模型次之，最后是覆盖在最上方的 UI 界面。这种正向遍历符合图形学的深度覆盖逻辑。
+    \item \textbf{事件流（从顶向下，Top-to-Bottom）}：当鼠标点击或按键触发时，事件分发器会从最顶层的 Overlay 开始倒序遍历（从栈顶到栈底）。
+\end{enumerate}
+这种“从顶向下”的事件传递机制实现了\textbf{事件拦截（Event Interception）}。例如，当用户点击 ImGui 面板上的一个按钮时，顶层的 \texttt{ImGuiLayer} 会捕获该点击事件并将其标记为“已处理（Handled）”。此时，下层的 \texttt{SceneLayer} 将不再收到该事件，从而有效避免了“穿透点击”现象——即在操作 UI 菜单时意外触发了场景中物体的选择或移动。
 
 \subsubsection{输入轮询（Input Polling）}
-虽然事件系统能够精准捕获动作，但对于需要“连续平滑响应”的交互（如 WASD 相机漫游），纯事件驱动往往会受限于操作系统的按键重复延迟（Key Repeat Delay），产生明显的顿挫感。
+虽然事件系统能够精准捕获动作，但却是一次性的，对于需要“连续平滑响应”的交互（如 WASD 相机漫游）等每帧主动查询当前的键盘或鼠标状态，就需要引入 输入轮询。
 
-为此，引擎引入了输入轮询机制。通过静态类 \texttt{Input}，系统可以直接查询当前硬件的瞬时状态：
+通过静态类 \texttt{Input}，系统可以直接查询当前硬件的瞬时状态，其类结构如图 \ref{fig:input_class_diagram} 所示：
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{figures/chapter3/input_class_diagram.png}
+    \caption{Input 静态类及其硬件接口封装图}
+    \label{fig:input_class_diagram}
+\end{figure}
+
 \begin{itemize}
     \item \textbf{主动查询}：在 \texttt{OnUpdate} 逻辑中，代码可以直接调用 \texttt{Input::IsKeyPressed(Key::W)}。
     \item \textbf{状态同步}：该接口本质上是对底层 GLFW 输入状态的封装，能够以与帧率同步的频率获取输入，从而实现无延迟的平滑移动体验。
 \end{itemize}
 
-综上所述，事件系统负责“决策与切换”（如切换渲染路径、开关 TAA），而输入轮询负责“连续交互与操作”。两者的结合使得 Chimera 能够同时具备响应的精确性与操作的丝滑感。
+事件系统负责“决策与切换”（如切换渲染路径、开关 TAA），而输入轮询负责“连续交互与操作”。
 
 \section{程序入口与主循环}
 
 \subsection{入口点设计}
-Chimera 使用了游戏开发中经典的入口点（Entry Point）模式。开发者不需要编写 \texttt{main} 函数，而是通过宏定义将自定义的 \texttt{Application} 子类注入引擎。
+本项目使用了游戏开发中经典的游戏循环模式模式。
 
 \subsection{游戏循环 (Game Loop)}
-在 \texttt{Application::Run()} 方法中，引擎维持着一个高效的死循环。每一帧的操作严格遵循以下序：
+在 \texttt{Application::Run()} 方法中，引擎维持着一个高效的死循环。每一帧的执行下面操作：
 \begin{enumerate}
     \item \textbf{获取步长}：计算两帧之间的时间差（Timestep），用于物理平滑交互。
-    \item \textbf{事件轮询}：通过操作系统获取最新的鼠标和键盘状态。
+    \item \textbf{事件轮询}：通过获取最新的鼠标和键盘状态。
     \item \textbf{层级更新}：遍历 \texttt{LayerStack}，执行每一层的 \texttt{OnUpdate} 逻辑。
     \item \textbf{渲染提交}：调用 \texttt{Renderer} 提交当前帧的绘制命令缓冲。
     \item \textbf{UI 渲染}：在场景渲染完成后，叠加 ImGui 调试界面。
 \end{enumerate}
 
-\section{资源抽象与句柄管理系统}
+\section{资源管理}
 
-在 Vulkan 这种显式图形 API 中，资源管理（显存分配、生命周期追踪与描述符绑定）是渲染器开发中最具挑战性的模块。为了确保系统的健壮性并降低 CPU 端的调度开销，Chimera 实现了一套高度抽象的“句柄化资源调度系统”。
+Vulkan 的复杂度源于其对资源生命周期、内存分配以及同步机制的显式控制。在 Vulkan 这种显式图形 API 中，资源管理是渲染器开发中最具挑战性的模块之一。为了确保系统的健壮性并降低 CPU 端的调度开销，Chimera 实现了一套高度抽象的“中心化资源调度系统”，通过单例模式的 \texttt{ResourceManager} 统一管控所有图形资源。
 
-\subsection{资源句柄化与虚拟化 (Resource Handle)}
-为了规避 C++ 原始指针带来的悬空指针风险与显存泄露问题，引擎引入了句柄化访问模式。逻辑层不再直接持有 \texttt{VkBuffer} 或 \texttt{VkImage}，而是通过轻量级的 \texttt{TextureHandle}、\texttt{MaterialHandle} 等句柄进行索引。
+\subsection{资源对象抽象与封装 (Resource Abstraction)}
+为了规避原始 Vulkan 句柄带来的管理负担，引擎将琐碎的 Vulkan 底层对象（如 \texttt{VkBuffer}、\texttt{VkImage} 等）封装为高级 C++ 类，包括 \texttt{Buffer}、\texttt{Image} 与 \texttt{Material} 类。
 
-这一设计的核心价值在于：
+其核心设计在于：
 \begin{itemize}
-    \item \textbf{地址隔离}：\texttt{ResourceManager} 内部维护着连续的资源池。即便底层物理资源因动态扩容或内存整理而发生位移，上层逻辑层持有的句柄 ID 依然保持不变，实现了逻辑引用与物理地址的解耦。
-    \item \textbf{类型安全}：通过强类型的句柄包装，系统能在编译期拦截错误的资源操作（如将材质句柄误传给纹理采样函数）。
+    \item \textbf{RAII 生命周期管理}：利用 C++ 的构造与析构函数实现资源的自动分配与释放。在对象析构时，系统会自动调用 Vulkan 的销毁函数并协同 VMA (Vulkan Memory Allocator) 释放关联的显存空间，从根本上杜绝了显存泄露的风险。
+    \item \textbf{内存抽象与便捷访问}：封装类隐藏了复杂的内存映射（Memory Mapping）与对齐逻辑。例如，\texttt{Buffer} 类提供了直观的 \texttt{UploadData()} 接口，内部自动处理暂存缓冲区（Staging Buffer）的中转或直接内存映射，极大简化了宿主机（Host）与设备（Device）之间的数据通信。
+    \item \textbf{材质数据驱动设计}：\texttt{Material} 类封装了基于 PBR 定义的材质参数。通过内部维护的“脏标记（Dirty Flag）”机制，系统仅在参数发生变化时才通过 \texttt{ResourceManager} 触发向 GPU 端的同步，有效减少了冗余的内存拷贝。
+\end{itemize}
+
+\subsection{中心化资源管理器 (ResourceManager)}
+引擎引入了单例模式的 \texttt{ResourceManager} 作为系统的核心资源枢纽，负责资源的全局生命周期调度与运行时管理。
+
+该管理器的核心职责体现如下：
+\begin{itemize}
+    \item \textbf{统一调度与池化存储}：\texttt{ResourceManager} 内部维护着连续的资源存储池。即便底层资源由于加载或动态更新而发生变动，上层逻辑层依然可以通过稳定的接口访问资源，实现了逻辑层与底层物理实现的完全解耦。
+    \item \textbf{延迟释放队列 (Resource Free Queue)}：考虑到 GPU 指令流的异步执行特性，管理器引入了延迟释放机制。当资源不再被引用时，其销毁操作会被推入一个按帧排序的队列，确保资源仅在确认 GPU 完成相关指令集后才进行物理释放，保证了多帧并行下的执行安全。
+    \item \textbf{全局描述符管理与同步}：管理器负责维护场景级别的全局描述符集（Global Descriptor Sets）。它自动将纹理数组、材质参数缓冲区等映射到特定的绑定点（Binding），支持“无绑定纹理（Bindless Texture）”技术，允许着色器通过索引直接访问海量纹理资源，显著降低了绘制调用（Draw Call）之间的状态切换开销。
 \end{itemize}
 
 \subsection{基于 VMA 的显存池化管理}
 在底层显存分配上，本项目集成了 AMD 开发的 \texttt{Vulkan Memory Allocator (VMA)}。
-由于 Vulkan 物理设备对内存分配次数有严格限制（通常仅为 4096 次），直接为每个纹理调用 \texttt{vkAllocateMemory} 会迅速耗尽系统资源。VMA 通过在大块预分配内存（Heap）上进行子分配（Sub-allocation）和碎片整理，实现了高效的显存池化管理。Chimera 将其封装在 \texttt{Buffer} 与 \texttt{Image} 类中，极大地简化了 Staging Buffer 的创建与数据同步流程。
+由于 Vulkan 物理设备对内存分配次数有严格限制，直接为每个纹理调用 \texttt{vkAllocateMemory} 会迅速耗尽系统资源。VMA 通过在大块预分配内存（Heap）上进行子分配（Sub-allocation）和碎片整理。Chimera 将其封装在 \texttt{Buffer} 与 \texttt{Image} 类中，极大地简化了 Staging Buffer 的创建与数据同步流程。
+
 
 \subsection{基于 Bindless 思想的全局描述符绑定}
 为了支持百万级面片与海量纹理的实时混合渲染，Chimera 采用了现代化的 **Bindless** 资源绑定架构：
@@ -152,7 +183,7 @@ Chimera 使用了游戏开发中经典的入口点（Entry Point）模式。开�
 \end{enumerate}
 在着色器中，程序不再需要频繁切换纹理绑定点，而是通过材质结构体中存储的索引值，直接在全局数组中访问对应的纹理。这种设计彻底消除了光栅化时代“一个物体一个 Draw Call”的性能瓶颈。
 
-\subsection{延迟销毁队列 (Deletion Queue)}
+\subsection{延迟销毁队列 }
 Vulkan 严禁在 GPU 仍在执行渲染指令时销毁其引用的资源。为了解决 CPU-GPU 异步导致的资源竞争问题，Chimera 实现了一套延迟销毁机制（Deletion Queue）：
 当用户请求释放某个资源时，\texttt{ResourceManager} 并不会立即调用销毁函数，而是将其推入队列并标记当前的帧序号。系统会等待两到三帧（对应双重或三重缓冲的完整循环）后，确保 GPU 已经彻底释放了对该资源的引用，才会执行最终的物理清理。这一机制是引擎能够稳定运行、不发生显存溢出的关键保障。
 
@@ -210,7 +241,7 @@ Vulkan 严禁在 GPU 仍在执行渲染指令时销毁其引用的资源。为�
     \item \textbf{投影矩阵 ($P$)}：应用透视除法，将坐标转换到归一化设备坐标（NDC）空间。
 \end{enumerate}
 
-\subsection{编辑器相机（EditorCamera）的交互实现}
+\subsection{相机的交互实现}
 Chimera 实现了一套基于弧球（Arcball）逻辑的编辑器相机。与传统的 FPS 相机不同，它围绕一个**焦点（Focal Point）**进行观察。
 \begin{itemize}
     \item \textbf{轨道飞行（Orbit）}：通过计算鼠标移动产生的偏航角（Yaw）和俯仰角（Pitch），结合四元数旋转，实现围绕目标的平滑旋转。
@@ -222,7 +253,7 @@ Chimera 实现了一套基于弧球（Arcball）逻辑的编辑器相机。与�
 \section{技术栈与构建方案}
 
 \subsection{构建系统：CMake}
-项目选择 \textbf{CMake} 作为构建系统。由于 Chimera 依赖大量的开源第三方库（如 GLFW, spdlog, GLM），CMake 的 \texttt{add\_subdirectory} 配合 \texttt{git submodule} 能够极大地简化依赖管理，并保证跨平台的编译一致性。
+项目选择 \textbf{CMake} 作为构建系统，CMake 作为一个C++编译工具，在开源世界中广泛使用，大部分C++开源项目都写好了 CMake 脚本，能极其方便得使用 \texttt{add\_subdirectory} 配合 \texttt{git submodule} 编译运行项目，同时也方便其他开发者编译部署。
 
 \subsection{核心依赖库清单}
 \begin{itemize}
@@ -234,4 +265,4 @@ Chimera 实现了一套基于弧球（Arcball）逻辑的编辑器相机。与�
 \end{itemize}
 
 \section{本章小结}
-本章构建了 Chimera 引擎的架构骨架。通过五层分层架构实现了系统解耦，并确立了“引擎库 + 应用”的工程模式。这些基础设施——包括 Application 主循环、资源管理句柄以及交互式相机——为后续章节探讨复杂的混合渲染管线奠定了坚实的工程基础。
+本章构建了 Chimera 引擎的架构骨架。通过五层分层架构实现了系统解耦，并确立了“引擎库 + 应用”的工程模式。这些基础设施——包括 Application 主循环、资源管理句柄以及交互式相机——为后续章节探讨复杂的混合渲染管线实现奠定工程基础。

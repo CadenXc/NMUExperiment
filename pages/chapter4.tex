@@ -1,20 +1,37 @@
-\chapter{渲染图架构与三大管线实现}
+% !Mode:: "TeX:UTF-8"
+
+\chapter{渲染图与渲染管线实现}
 \label{sec:render_graph}
 
 本章将深入探讨 Chimera 引擎的核心调度中枢——渲染图（Render Graph）模块，并详细阐述如何基于该架构构建光栅化、光线追踪以及混合渲染三大核心管线。通过声明式的资源管理与自动化的同步机制，本系统实现了复杂渲染流程的高效调度。
 
-\section{渲染图调度系统设计}
+\section{渲染图（Render Graph）调度系统设计}
 
-Render Graph 是 Chimera 引擎的调度中枢，其核心目标是将高层的渲染逻辑与底层的 Vulkan 资源同步（如屏障、布局转换）解耦。通过分析其源码实现，本系统的 Render Graph 采用了一种“声明式”与“流式接口”相结合的设计模式。
+Render Graph（亦称 Frame Graph）作为一种现代渲染架构，最早由 Yuriy O'Donnell 在 GDC 2017 的演讲中提出，用于Frostbite引擎的渲染管线管理。让开发者脱离了复杂的Shader配置地狱，通过构建有向无环图（DAG）实现了渲染逻辑与底层同步的深度解耦。
 
-\subsection{核心类层次结构与协作逻辑}
-渲染图系统的实现涉及多个核心类，如图 \ref{fig:render_graph_class_diagram} 所示。其协作逻辑可归纳为以下三个阶段：
+\subsection{渲染图基本原理：自动化流水线工厂}
+为了更形象地理解 Render Graph 的内部工作原理，我们可以将其类比为一个高度自动化的流水线工厂：
 
-\begin{enumerate}
-    \item \textbf{声明阶段 (Setup Phase)}：利用 \texttt{PassBuilder} 提供流式 API。通过 \texttt{AddPass} 方法，开发者在 Lambda 闭包中定义资源的读写关系。
-    \item \textbf{代理配置 (Resource Proxy)}：\texttt{ResourceHandleProxy} 允许在声明时链式配置资源的格式（Format）、清空值（Clear Value）以及持久化属性（Persistent），这体现了 Builder 设计模式的灵活性。
-    \item \textbf{执行阶段 (Execution Phase)}：当 \texttt{Execute} 被触发时，\texttt{RenderGraphRegistry} 作为虚拟句柄与物理 Vulkan 对象（如 \texttt{VkImageView}）之间的桥梁，为闭包提供真实的硬件资源。
-\end{enumerate}
+\begin{itemize}
+    \item \textbf{Render Graph}：相当于工厂的中央自动化调度系统。它并不参与体力活，但负责监控全局物料流向并规划每一道工序的生产时序。
+    \item \textbf{Pass}：是生产的最小单元。每一个工作站通过派工单明确告知系统：“我需要从哪个仓库领取半成品（Input），以及最终产出的产品（Output）存放在何处”。
+    \item \textbf{Shader}：被固定在各个工作站中。一旦原材料（纹理、缓冲区）由系统运送到位，他们就按照既定操作手册（GLSL 代码）完成底层的计算工作。
+    \item \textbf{Resource}：在渲染图中，资源既是 Pass 提交的虚拟“提货单”，也是最终映射在 GPU 上的真实物理显存。
+    \item \textbf{RenderPath}：决定了整条流水线的拓扑构型。根据最终产品的需求，架构师将一系列复杂的工序图纸交接给工厂。
+\end{itemize}
+
+这种设计哲学的核心在于：**显式声明依赖，隐式自动同步**。开发者只需关注“我要做什么”，而系统负责处理“我该怎么做”。
+
+\subsection{架构设计动机：规避“同步地狱”}
+在 Chimera 引擎开发初期，我尝试手动管理 Vulkan 的同步。但随着混合渲染管线的建立，Pass 和Shader数量迅速增加，手动配置每一帧的图像布局转换（Layout Transition）和同步屏障（Barrier）变得极其痛苦且易错。引入 Render Graph 架构的能让系统自动管理，有以下几个好处：
+\begin{itemize}
+    \item \textbf{自动化同步推导}：系统通过分析 Pass 间的读写关系，自动插入 \texttt{vkCmdPipelineBarrier2}，确保了显存访问的安全性。
+    \item \textbf{资源复用与优化}：基于资源的生命周期分析，系统可以自动让不重叠的资源共用同一块显存空间，提高存带宽利用率，防止溢出。
+    \item \textbf{快速验证与可视化}：基于 DAG 的底层实现，配合调试面板，开发者可以实时截取任意中间 View 输出，能在开发过程中快速验证每个 Pass 的正确性，确保渲染图的正确。
+\end{itemize}
+
+\subsection{Chimera 引擎的系统实现}
+本系统的渲染图模块在工程上被拆分为 \texttt{RenderGraph.h} 与 \texttt{RenderGraphCommon.h}。其核心协作关系采用 **外观模式（Facade）** 与 **策略模式（Strategy）** 相结合的方案，其核心类层次结构如图 \ref{fig:render_graph_class_diagram} 所示。
 
 \begin{figure}[H]
     \centering
@@ -23,122 +40,111 @@ Render Graph 是 Chimera 引擎的调度中枢，其核心目标是将高层的�
     \label{fig:render_graph_class_diagram}
 \end{figure}
 
-\subsection{声明式接口与自动屏障推导}
-Render Graph 的核心价值在于将 Vulkan 繁琐的屏障（Barrier）管理自动化。开发者只需声明 Pass 对资源的读写意图（如 Read 或 Write），系统会自动对比资源的当前布局（Layout）并插入 \texttt{vkCmdPipelineBarrier2}。这解决了手动管理写后读（RAW）冒险时极易出错的问题，使开发者能专注于渲染算法本身。
+根据类图分析，Chimera 的具体实现由以下四个核心组件构成：
 
-\subsection{基于闭包的跨管线调度}
-为了统一处理图形（Graphics）、计算（Compute）与光线追踪（Ray Tracing）任务，本系统设计了一套策略模式的执行上下文（ExecutionContext）。
+\begin{enumerate}
+    \item \textbf{RenderGraph (调度大脑)}：作为系统的中枢，它持有所有的渲染通道栈（\texttt{m\_PassStack}）与物理资源池（\texttt{m\_Resources}）。它驱动了从依赖收集到指令提交的完整生命周期。
+    \item \textbf{PassBuilder (外观接口)}：这是开发者在 \texttt{AddPass} 阶段唯一接触的接口。通过外观模式，它隐藏了底层的物理资源分配细节，用语义化的 \texttt{Read} 与 \texttt{Write} 方法，从架构层面保证了任务依赖关系的清晰。
+    \item \textbf{RenderPass (任务单元)}：负责存储具体的任务元数据，包括 Pass 类型、着色器名称以及核心执行闭包。这种设计实现了管线拓扑构建与具体指令执行的物理解耦。
+    \item \textbf{ExecutionContext (策略上下文)}：针对不同计算负载（图形、计算、光追），系统会注入对应的上下文对象。这种策略模式的应用，使得开发者在编写具体的 Pass 逻辑时，能获得类型安全的 API 调用环境，在架构层面规避了误操作。
+\end{enumerate}
+
+\subsection{运行生命周期实录：Setup -> Compile -> Execute}
+Chimera 的渲染图每帧会经历三个关键阶段：
+
+\subsubsection{Setup}
+在此阶段，主程序顺序调用各 Pass 的注册逻辑。开发者通过 \texttt{PassBuilder} 建立任务间的依赖关系。此阶段不分配显存，不提交指令，仅仅是在内存中构建出一张“虚拟依赖图”。
+
+\subsubsection{Compile}
+在每一帧渲染前，Render Graph 会对当前的拓扑结构进行一次高效编译：
 \begin{itemize}
-    \item \textbf{解耦机制}：\texttt{RenderPass} 类不直接持有具体的绘制指令，而是持有一个执行闭包。
-    \item \textbf{多管线支持}：根据 Pass 类型的不同，系统会向闭包注入不同类型的上下文，从而实现如模型绘制（DrawMeshes）、计算调度（Dispatch）或光迹追踪（TraceRays）的统一调用。
+    \item \textbf{拓扑排序}：利用 DFS 算法计算出一个合法的执行序列，确保生产者始终在消费者之前运行。
+    \item \textbf{生存区间分析}：计算每个资源的 \texttt{firstPass} 和 \texttt{lastPass}。对于生命周期不重叠的资源，系统会执行“显存复用（Aliasing）”策略，同时剔除多余的Pass。
 \end{itemize}
 
-\section{核心渲染管线的构建与实现}
-
-在 Render Graph 的框架下，本系统构建了三条具有不同应用场景的渲染路径。
-
-\subsection{光栅化渲染管线 (Rasterization Pipeline)}
-光栅化路径利用 Vulkan 动态渲染特性实现高效的前向渲染。在 Chimera 引擎中，该路径的资源流转拓扑如图 \ref{fig:forward_topology} 所示，体现了从几何绘制到后期处理的完整线性流水线。
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.7\textwidth]{figures/chapter4/forward_render_diagram.png}
-    \caption{前向光栅化管线资源流转拓扑图}
-    \label{fig:forward_topology}
-\end{figure}
-
-根据拓扑图分析，光栅化管线的执行逻辑可归纳为以下步骤：
-\begin{enumerate}
-    \item \textbf{几何与环境绘制阶段}：\texttt{SkyboxPass} 与 \texttt{ForwardPass} 并行或顺序写入 \texttt{FinalColor} 附件。其中，\texttt{ForwardPass} 除了输出颜色外，还负责生成 \texttt{Depth}（深度缓冲）和 \texttt{Motion}（运动矢量），这些是后续时域算法的关键输入。
-    \item \textbf{时域抗锯齿 (TAA) 阶段}：利用计算管线实现的 \texttt{TAAPass} 接收原始颜色、深度及运动矢量，并结合上一帧的历史资源（\texttt{TAA\_Pong}）进行累积采样。该阶段输出平滑后的 \texttt{TAAOutput} 并更新历史记录（\texttt{TAA\_Ping}）。
-    \item \textbf{后期处理与输出阶段}：\texttt{PostProcessPass} 对 TAA 处理后的信号执行色调映射（Tone Mapping）与伽马校正，最终生成 \texttt{RENDER\_OUTPUT} 提交至交换链进行显示。
-\end{enumerate}
-
-
-\subsection{光线追踪渲染管线 (Ray Tracing Pipeline)}
-利用显卡的硬件加速单元，系统实现了完整的光路追踪路径。与光栅化管线不同，该路径的核心在于利用着色器绑定表（SBT）组织的递归追踪流程。其资源流转拓扑如图 \ref{fig:rt_topology} 所示。
+\subsubsection{Execute}
+在执行阶段，系统遍历排序后的序列，并激活底层的“自动同步引擎”：
+\begin{itemize}
+    \item \textbf{屏障自动推导}：系统记录每个资源的当前布局。若下一 Pass 的需求与当前不符，则自动生成 \texttt{vkCmdPipelineBarrier2} 指令。
+    \item \textbf{外部资源集成}：针对交换链图像等外部资源，系统能智能识别其对应的生命周期，减少编写Pass时手动管理底层的格式错误等问题。
+\end{itemize}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{figures/chapter4/raytracing_render_diagram.png}
-    \caption{纯光线追踪管线资源流转拓扑图}
-    \label{fig:rt_topology}
+    \includegraphics[width=1.0\textwidth]{figures/chapter4/hybrid_render_graph.png}
+    \caption{通过渲染图自动生成的混合渲染管线执行拓扑图 (Mermaid Export)}
+    \label{fig:mermaid_graph}
 \end{figure}
 
-光线追踪管线的逻辑流程如下：
+\subsection{工程优势总结}
+通过实现这套复杂的工厂化调度系统，Chimera 引擎获得了以下功能：
 \begin{enumerate}
-    \item \textbf{光线生成与求交阶段}：核心节点 \texttt{RaytracePass} 整合了射线生成（.rgen）、未命中（.rmiss）、最近交点（.rchit）及阴影任意交点（.rahit）四类着色器。该阶段直接根据相机参数发射射线，并输出原始光照颜色 \texttt{FinalColor} 与用于时域对齐的 \texttt{Motion} 矢量。
-    \item \textbf{时域稳定阶段}：由于实时光追通常限制在极低采样率（如 1 SPP），输出画面存在严重的噪声。系统通过 \texttt{TAAPass} 引入时域反馈，利用历史缓冲区 \texttt{TAA\_Ping} 与当前帧进行加权融合，生成相对稳定的 \texttt{TAAOutput}。
-    \item \textbf{后期处理阶段}：\texttt{PostProcessPass} 接收稳定后的信号，完成 HDR 到 SDR 的转换，最终输出 \texttt{RENDER\_OUTPUT}。
+    \item \textbf{自动同步}：彻底避免了手动管理 Vulkan 同步时易出现的写后读（RAW）冒险导致的画面闪烁。
+    \item \textbf{模块化}：新增 Pass 只需声明输入输出，无需改动现有管线的任何同步逻辑。
+    \item \textbf{能监控}：系统可以轻松插入时间戳查询，为每一个 Pass 提供纳秒级的耗时统计。
 \end{enumerate}
 
-\subsection{混合渲染管线 (Hybrid Pipeline)}
-混合管线结合了光栅化与光线追踪的优势，是本系统的核心渲染模式。其设计理念是利用光栅化处理高带宽的几何可见性，利用光线追踪处理复杂的非局部光照特效。
+\section{混合渲染管线的拓扑集成与数据流转}
 
-根据图 \ref{fig:hybrid_topology_off} 的拓扑结构，混合管线在不开启降噪时的执行逻辑如下：
+在完成渲染图基础设施的搭建后，本节将重点阐述如何利用该框架集成具体的混合渲染路径（Hybrid Path）。如图 \ref{fig:hybrid_data_flow} 所示，Chimera 引擎的混合渲染管线是一个跨越了图形、光线追踪的复杂有向无环图。
+
+\subsection{基于光栅化的几何信息采集}
+管线的起点是基于光栅化的几何采集阶段，其核心任务是构建 G-Buffer。
 \begin{enumerate}
-    \item \textbf{G-Buffer 几何采集阶段}：\texttt{GBufferPass} 利用光栅化管线一次性输出 \texttt{Albedo}、\texttt{Normal}、\texttt{Material}、\texttt{Motion}、\texttt{Emissive} 及 \texttt{Depth}。这些高精度的几何与材质信号为后续的光追阶段提供了完美的“底座”。
-    \item \textbf{分路光线追踪阶段}：系统并行发起多路光追任务。
+    \item \textbf{Depth-Prepass}：首先执行仅深度写入的预处理。由于后续的光追射线发射高度依赖深度缓冲，提前生成的深度图不仅能实现 Early-Z 优化，还能为光调阶段提供精确的求交起始点。
+    \item \textbf{多附件 G-Buffer 布局}：在 \texttt{GBufferPass} 中，系统同时向五个颜色附件写入数据（图 \ref{fig:gbuffer_decomposition}）。为了兼顾性能与光追需求，其布局设计如下：
     \begin{itemize}
-        \item \texttt{RTShadowAOPass}：基于深度与法线生成硬/软阴影及环境遮蔽（Shadow/AO）。
-        \item \texttt{RTReflectionPass}：利用材质参数追踪镜面反射信号，输出 \texttt{ReflectionRaw}。
-        \item \texttt{RTDiffuseGIPass}：计算场景间的间接弥散光照，输出 \texttt{GIRaw}。
+        \item \texttt{Albedo} (RGBA8) 与 \texttt{Emissive}：存储材质的基础反射率与自发光。
+        \item \texttt{Normal} (RGBA16F)：以高精度存储世界空间法线，确保光追射线方向的准确性。
+        \item \texttt{Material} (RGBA8)：打包存储金属度、粗糙度及环境遮蔽（AO）因子。
+        \item \texttt{Motion} (RG16F)：记录像素级的屏幕空间速度矢量，这是后续 TAA 算法的时域核心。
     \end{itemize}
-    \item \textbf{物理合成与稳定阶段}：\texttt{Composition} Pass 接收上述所有光栅化与光追结果，按照物理光照模型进行最终合并（\texttt{FinalColor}）。最后通过 \texttt{TAAPass} 执行时域抗锯齿，并进入后期处理流程。
 \end{enumerate}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.85\textwidth]{figures/chapter4/hybrid_svgf_off_render_diagram.png}
-    \caption{混合渲染管线资源流转拓扑图 (关闭 SVGF 降噪)}
-    \label{fig:hybrid_topology_off}
-\end{figure}
-
-而在开启 SVGF 降噪后，如图 \ref{fig:hybrid_topology_on} 所示，管线的复杂度显著增加。系统为每一路光追信号（阴影、反射、全局光照）分别构建了独立的降噪流水线：
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.95\textwidth]{figures/chapter4/hybrid_svgf_on_render_diagram.png}
-    \caption{混合渲染管线资源流转拓扑图 (开启 SVGF 降噪)}
-    \label{fig:hybrid_topology_on}
-\end{figure}
-
-\begin{itemize}
-    \item \textbf{多路并行降噪 (Multi-channel Denoising)}：针对 \texttt{CurColor}（阴影/AO）、\texttt{ReflectionRaw} 和 \texttt{GIRaw}，系统并行启动了三组 SVGF 逻辑。每一组均包含时域累积（Temporal）、五级阶梯式 A-Trous 滤波（Atrous 0-4）以及最终合并（Combine）三个子阶段。
-    \item \textbf{时域反馈环路 (History Feedback Loop)}：这是拓扑图中最为关键的结构。在 \texttt{Temporal} 阶段，系统不仅读取当前帧的 G-Buffer，还深度依赖于上一帧保留的 \texttt{History\_Depth}、\texttt{History\_Normal} 以及各路信号的历史累积值（如 \texttt{History\_ShadowAccum}）。这种跨帧的数据流转形成了图中的闭环，是实现 1 SPP 稳定渲染的核心。
-    \item \textbf{边缘保留滤波 (Edge-stopping Filtering)}：在五次迭代的 A-Trous 滤波过程中，系统利用 \texttt{Normal} 和 \texttt{Depth} 计算边缘权重，确保光照信号在平滑的同时，几何边缘（如墙角、物体轮廓）依然清晰，避免产生“漏光”或“糊影”现象。
-\end{itemize}
-
-最终，经过降噪处理后的高质量信号（如 \texttt{Shadow\_Filtered\_Final}）被送入 \texttt{Composition} Pass。这种设计确保了即便在光追采样极其稀疏的情况下，依然能获得具备时域稳定性且物理正确的渲染效果。
 
 \begin{figure}[H]
     \centering
     \begin{minipage}{0.48\textwidth}
         \centering
         \includegraphics[width=\textwidth]{figures/chapter5/gbuffer-albedo.png}
-        \caption*{(a) 反照率 (Albedo)}
+        \caption*{(a) Albedo (基础反射率)}
     \end{minipage}
     \hfill
     \begin{minipage}{0.48\textwidth}
         \centering
         \includegraphics[width=\textwidth]{figures/chapter5/gbuffer-normal.png}
-        \caption*{(b) 世界空间法线 (Normal)}
+        \caption*{(b) Normal (世界空间法线)}
     \end{minipage}
     \vspace{10pt}
     \begin{minipage}{0.48\textwidth}
         \centering
         \includegraphics[width=\textwidth]{figures/chapter5/gbuffer-material.png}
-        \caption*{(c) 材质属性 (Material)}
+        \caption*{(c) Material (金属/粗糙/AO)}
     \end{minipage}
     \hfill
     \begin{minipage}{0.48\textwidth}
         \centering
         \includegraphics[width=\textwidth]{figures/chapter5/gbuffer_depth_linear.png}
-        \caption*{(d) 线性深度 (Linear Depth)}
+        \caption*{(d) Linear Depth (线性深度)}
     \end{minipage}
-    \caption{混合渲染管线底座：G-Buffer 中间层输出结果}
-    \label{fig:gbuffer_outputs_arch}
+    \caption{G-Buffer 多附件几何属性分解图}
+    \label{fig:gbuffer_decomposition}
 \end{figure}
 
+\subsection{硬件加速光线追踪：按需查询与特征提取}
+在获取完整的 G-Buffer 信息后，渲染图激活三个独立的光线追踪 Pass。这一阶段的核心特征是“以光栅化结果引导光线追踪”：
+\begin{itemize}
+    \item \textbf{RTShadowAOPass}：读取深度与法线图，在半球范围内发射阴影射线，产出噪声原始信号 \texttt{CurColor}。
+    \item \textbf{RTReflectionPass}：基于法线与材质的粗糙度，通过重要性采样发射反射射线，生成 \texttt{ReflectionRaw}。
+    \item \textbf{RTDiffuseGIPass}：利用硬件光线追踪加速结构（TLAS），在世界空间内进行间接光采样，产出 \texttt{GIRaw}。
+\end{itemize}
+
+\subsection{信号合成与时域反馈环路}
+管线的末端负责将离散的光照信号重建为高质量图像：
+\begin{enumerate}
+    \item \textbf{Composition (逻辑合成)}：\texttt{CompositionPass} 作为一个全屏图形通道，将 G-Buffer 的基础属性与三个光追原始信号进行物理加权合并，产出 \texttt{FinalColor}。
+    \item \textbf{TAAPass (计算重建)}：这是系统中唯一的 Compute Pass。它采用“Ping-Pong”缓冲机制，读取上一帧的 \texttt{TAA\_Ping} 与当前帧的运动矢量，在计算空间内完成时域信号的累积与抗锯齿处理，输出 \texttt{TAAOutput}。
+    \item \textbf{PostProcess (最终映射)}：作为管线的唯一出口，该 Pass 执行抖动补偿、ACES 色调映射以及伽马校正，最终将计算结果写入交换链的 \texttt{RENDER\_OUTPUT}。
+\end{enumerate}
+
 \section{本章小结}
-本章完成了 Chimera 引擎核心调度架构与三大渲染管线的构建。Render Graph 的引入不仅解决了 Vulkan 复杂的同步难题，更为光栅化与光线追踪的深度融合提供了底座。这使得系统能够在下一章中，专注于解决 1 SPP 采样率下的信号重建与画质增强难题。
+本章完成了 Chimera 引擎核心调度架构与三大渲染管线的集成实现。Render Graph 的引入提供了现代的管理方式，使得渲染管线的管理流程方便快捷。这使得系统能够在下一章中，专注于解决 锯齿问题，进一步提升图像质量。
