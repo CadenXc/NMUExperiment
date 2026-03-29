@@ -46,7 +46,31 @@ Render Graph（亦称 Frame Graph）作为一种现代渲染架构，最早由 Y
     \item \textbf{RenderGraph (调度大脑)}：作为系统的中枢，它持有所有的渲染通道栈（\texttt{m\_PassStack}）与物理资源池（\texttt{m\_Resources}）。它驱动了从依赖收集到指令提交的完整生命周期。
     \item \textbf{PassBuilder (外观接口)}：这是开发者在 \texttt{AddPass} 阶段唯一接触的接口。通过外观模式，它隐藏了底层的物理资源分配细节，用语义化的 \texttt{Read} 与 \texttt{Write} 方法，从架构层面保证了任务依赖关系的清晰。
     \item \textbf{RenderPass (任务单元)}：负责存储具体的任务元数据，包括 Pass 类型、着色器名称以及核心执行闭包。这种设计实现了管线拓扑构建与具体指令执行的物理解耦。
-    \item \textbf{ExecutionContext (策略上下文)}：针对不同计算负载（图形、计算、光追），系统会注入对应的上下文对象。这种策略模式的应用，使得开发者在编写具体的 Pass 逻辑时，能获得类型安全的 API 调用环境，在架构层面规避了误操作。
+    \item \textbf{ExecutionContext (指令上下文包装器)}：为了统一不同流水线的指令录制逻辑，系统构建了一套分层继承体系。基类 \texttt{ExecutionContext} 抽象了诸如常量推送（Push Constants）与资源查询等共性操作；派生出的子类则根据管线特性，严格限制了 API 的访问权限（例如计算上下文仅暴露 \texttt{Dispatch} 接口）。这种设计通过策略模式确保了开发者在编写 Pass 逻辑时，只能调用当前流水线合法的 API，从架构层面杜绝了指令错用的风险。
+\end{enumerate}
+
+\subsection{指令录制优化：基于静态多态的智能路由}
+在复杂的混合渲染管线中，频繁地手动实例化不同的执行上下文会产生大量样板代码。为此，Chimera 引擎在 \texttt{RenderGraph} 中实现了一套基于静态多态（Static Polymorphism）的智能分发机制。
+
+\subsubsection{特征探测与分发逻辑}
+利用 C++17 的 \texttt{if constexpr} 配合模板元编程中的 SFINAE（替换失败非错）特征检测技术，系统能够在编译期自动探测 Pass 类定义的 \texttt{Execute} 函数签名。分发器的核心逻辑可用下式表达：
+
+\begin{equation}
+    Dispatch(Pass) \rightarrow 
+    \begin{cases} 
+    AddGraphicsPass & \text{if } Pass \text{ implements } Execute(\dots, GraphicsContext\&) \\
+    AddComputePass & \text{if } Pass \text{ implements } Execute(\dots, ComputeContext\&) \\
+    AddRaytracingPass & \text{if } Pass \text{ implements } Execute(\dots, RaytracingContext\&) \\
+    AddPassRaw & \text{fallback for legacy RenderGraphRegistry}
+    \end{cases}
+\end{equation}
+
+\subsubsection{架构优势}
+这种“编写即配置”的设计带来了显著的工程优势：
+\begin{enumerate}
+    \item \textbf{开发者体验}：开发者仅需在 \texttt{Execute} 函数参数中声明所需的上下文类型，系统便会自动处理诸如 \texttt{vkBeginRendering} 等底层初始化工作。
+    \item \textbf{编译期安全}：若开发者尝试在计算 Pass 中调用图形 API，编译器将直接报错，而非在运行时崩溃，极大地缩短了调试周期。
+    \item \textbf{无损性能}：由于分发逻辑在编译期确定，执行阶段完全没有额外的虚函数调用或条件判断开销。
 \end{enumerate}
 
 \subsection{运行生命周期实录：Setup -> Compile -> Execute}

@@ -20,31 +20,38 @@
 
 其核心的双向反射分布函数（BRDF）采用 Cook-Torrance 模型：
 \begin{equation}
-    f_r(p, \omega_i, \omega_o) = \frac{D(h)F(v, h)G(l, v, h)}{4(n \cdot l)(n \cdot v)}
+    f_r(p, \omega_i, \omega_o) = k_d \frac{c}{\pi} + k_s \frac{D(h)F(v, h)G(l, v, h)}{4(n \cdot l)(n \cdot v)}
 \end{equation}
-其中，$D(h)$ 为法线分布函数（NDF），$F$ 为菲涅尔项（Fresnel），$G$ 为几何遮蔽项（Geometry）。本文重点讨论 Trowbridge-Reitz (GGX) 分布在实时渲染中的应用。
+其中，$k_d$ 和 $k_s$ 分别代表漫反射和镜面反射的能量比例，满足能量守恒定律。$D(h)$ 为 Trowbridge-Reitz GGX 分布函数，$F$ 采用 Schlick 近似菲涅尔项，$G$ 则基于 Smith 模型描述表面的几何遮蔽与阴影效应。
 
 \subsection{渲染方程与蒙特卡洛积分}
-% 核心点：全局光照的数学本质
-场景中任意点的出射辐亮度 $L_o$ 由 Kajiya 提出的渲染方程描述。在实时端，由于解析解难以求得，通常采用蒙特卡洛积分（Monte Carlo Integration）进行数值估算：
+场景中任意点的出射辐亮度 $L_o$ 由 Kajiya 提出的渲染方程（Rendering Equation）描述：
 \begin{equation}
-    E[f(x)] \approx \frac{1}{N} \sum_{i=1}^{N} \frac{f(x_i)}{p(x_i)}
+    L_o(p, \omega_o) = L_e(p, \omega_o) + \int_{\Omega} f_r(p, \omega_i, \omega_o) L_i(p, \omega_i) (n \cdot \omega_i) d\omega_i
 \end{equation}
-在 1 SPP（每像素一采样）下，如何通过重要性采样（Importance Sampling）降低方差是使用 Temporal 技术的好场景。
+该方程指出，某点的出射光是其自身发光 $L_e$ 与半球范围内入射光 $L_i$ 经过表面反射后的总和。在实时混合渲染中，由于积分项无法解析求得，通常采用蒙特卡洛积分进行离散采样估算：
+\begin{equation}
+    L_o(p, \omega_o) \approx \frac{1}{N} \sum_{i=1}^{N} \frac{f_r(p, \omega_i, \omega_o) L_i(p, \omega_i) (n \cdot \omega_i)}{p(\omega_i)}
+\end{equation}
+其中 $p(\omega_i)$ 是对应的概率密度函数（PDF）。在 1 SPP（每像素一采样）的严苛限制下，这种随机采样会导致严重的噪声，这是后续 SVGF 降噪算法需要解决的核心矛盾。
 
 \section{现代显式图形 API（Vulkan）架构}
 
 \subsection{显式资源管理与同步机制}
-% 核心点：Vulkan 相比 OpenGL 的核心优势
-不同于传统的图形学 API，Vulkan 是现代的图形学API，提供给用户更细致的权限，让开发者更细致的控制。
+不同于传统的图形 API（如 OpenGL）采用隐式状态机管理，Vulkan 强制要求开发者对底层硬件行为进行显式驱动：
 \begin{itemize}
-    \item \textbf{内存管理}：论述显存堆（Memory Heap）的手动分配与缓冲区（Buffer）/图像（Image）的绑定流程。
-    \item \textbf{同步与屏障}：分析 Pipeline Barrier 与 Render Pass 依赖如何解决 GPU 上的数据竞争（RAW/WAR/WAW）。
+    \item \textbf{显存生命周期管理}：论述显存堆（Memory Heap）的手动分配流程。通过 \texttt{vkBindBufferMemory} 实现显存地址与资源对象的关联，极大地提高了显存利用率。
+    \item \textbf{屏障与同步}：Vulkan 1.3 的 \texttt{Synchronization2} 机制允许通过 \texttt{VkImageMemoryBarrier2} 显式描述 GPU 上的执行依赖（Stage Mask）与内存访问（Access Mask），有效解决了“写后读（RAW）”等数据竞争问题。
 \end{itemize}
 
-\subsection{Vulkan 动态渲染}
-% 核心点：本项目用到的现代化特性
-本文利用了 Vulkan 1.3 引入的动态渲染（Dynamic Rendering）特性， 传统Vulkan渲染需要预先创建渲染通道(RenderPass)和帧缓冲(Framebuffer)对象，而动态渲染允许开发者直接在命令缓冲区中开始和结束渲染操作， 省去了传统的 Render Pass 对象创建，简化了渲染图（Render Graph）的节点构建流程，提高了管线切换的灵活性。
+\subsection{Vulkan 现代特性：动态渲染 (Dynamic Rendering)}
+传统 Vulkan 加速管线的构建需要繁琐的渲染通道（Render Pass）与帧缓冲（Framebuffer）对象，这不仅增加了代码冗余，还限制了渲染图（Render Graph）在动态切换 Pass 时的灵活性。
+
+本文全面采用了 Vulkan 1.3 的动态渲染特性（KHR\_dynamic\_rendering）：
+\begin{itemize}
+    \item \textbf{架构简化}：通过 \texttt{vkCmdBeginRendering} 替代了复杂的渲染通道对象创建，允许在执行时动态指定颜色、深度附件的视图（ImageView）与格式。
+    \item \textbf{Render Graph 兼容性}：该特性使得渲染图中的每个虚拟节点（Virtual Node）可以更加轻量地映射到物理资源，消除了由于 Render Pass 布局不匹配导致的管线重编译开销。
+\end{itemize}
 
 \section{硬件加速光线追踪原理}
 

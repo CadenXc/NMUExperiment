@@ -187,30 +187,57 @@ Vulkan 的复杂度源于其对资源生命周期、内存分配以及同步机�
 Vulkan 严禁在 GPU 仍在执行渲染指令时销毁其引用的资源。为了解决 CPU-GPU 异步导致的资源竞争问题，Chimera 实现了一套延迟销毁机制（Deletion Queue）：
 当用户请求释放某个资源时，\texttt{ResourceManager} 并不会立即调用销毁函数，而是将其推入队列并标记当前的帧序号。系统会等待两到三帧（对应双重或三重缓冲的完整循环）后，确保 GPU 已经彻底释放了对该资源的引用，才会执行最终的物理清理。这一机制是引擎能够稳定运行、不发生显存溢出的关键保障。
 
-\section{场景组织与硬件加速结构维护}
+\subsection{异步资源加载与多线程调度}
+在处理 Sponza 或 Bistro 等大规模复杂场景时，同步加载机制会导致主线程在执行磁盘 IO 与几何解析时出现明显的长时间卡顿（Stall）。为了实现“零卡顿”的用户体验，Chimera 构建了一套基于任务系统（Task System）的全异步资源加载流水线。
 
-如果说资源系统提供了渲染的“砖块”，那么场景系统则定义了“建筑的拓扑结构”。在实时光线追踪背景下，传统的空间划分方案（如八叉树或 BSP 树）因其结构僵硬且 CPU 维护开销大，已逐渐被更适合 GPU 遍历的层次包围盒（BVH）所取代。
+\begin{enumerate}
+    \item \textbf{多线程任务系统}：引擎在启动时初始化一个常驻线程池，根据宿主机的 CPU 核心数动态分配工作线程。通过 \texttt{std::future} 机制，主线程可以非阻塞地调度耗时的 IO 或计算任务。
+    \item \textbf{四阶段异步流水线}：我们将资源加载拆分为四个解耦阶段：
+    \begin{itemize}
+        \item \textbf{IO 与解析阶段}：在后台线程调用 \texttt{cgltf} 库读取文件并解析场景层级。
+        \item \textbf{并行解码阶段}：利用多核优势，将模型引用的数十张贴图分发至线程池并行执行图像解码（stbi\_load）。
+        \item \textbf{异步 GPU 上传}：在后台线程录制上传指令，并结合全局互斥锁（Queue Mutex）安全地向 GPU 提交数据。
+        \item \textbf{延迟集成阶段}：主线程每帧轮询任务进度，一旦后台准备就绪，仅通过廉价的指针交换与 TLAS 更新将模型挂载至场景树。
+    \end{itemize}
+    \item \textbf{外部同步机制}：由于 Vulkan 的 \texttt{VkQueue} 与描述符池是非线程安全的，引擎在 \texttt{VulkanContext} 层引入了针对队列提交的全局互斥锁，确保了多线程资源上传与主线程渲染指令提交之间的外部同步（External Synchronization），在维持高效并行的同时杜绝了校验层报错。
+\end{enumerate}
+通过该架构，引擎实现了在复杂模型加载期间，用户依然可以流畅地操作相机、切换渲染模式，极大地提升了系统的交互响应性能。
+
+\section{场景组织与空间加速算法}
+
+如果说资源系统提供了渲染的“砖块”，那么场景系统则定义了“建筑的拓扑结构”。在 Chimera 引擎中，为了兼顾传统光栅化管线的提交效率与实时光线追踪的遍历性能，本文实现了一套“CPU 空间划分 + GPU 硬件加速”的双层加速架构。
 
 \subsection{实体-组件式的场景结构}
 为了兼顾开发灵活性与运行效率，Chimera 的场景层采用了轻量级的组件化设计：
 \begin{itemize}
-    \item \textbf{Entity（实体）}：场景中的基本逻辑单元，持有一个全局唯一的 ID。
-    \item \textbf{TransformComponent}：负责维护物体的 4x4 TRS 变换矩阵，并追踪“前一帧变换（Previous Transform）”，为 TAA 和运动模糊提供关键的运动矢量数据。
-    \item \textbf{MeshComponent}：作为几何体载体，持有关联的 \texttt{Model} 句柄，实现了几何数据与逻辑实体的解耦。
+    \item \textbf{Entity（实体）}：场景中的基本逻辑单元，持有全局唯一的 ID 与关联的组件索引。
+    \item \textbf{TransformComponent}：维护物体的 4x4 TRS 变换矩阵，并追踪前一帧变换数据，为 TAA 提供了关键的运动矢量（Motion Vector）。
+    \item \textbf{MeshComponent}：作为几何体载体，持有关联的 \texttt{Model} 引用，实现了几何数据与逻辑实体的解耦。
 \end{itemize}
 
-\subsection{基于 GLTF 的场景导入流水线}
-场景的数据驱动主要通过 GLTF 2.0 格式实现。本项目利用 \texttt{cgltf} 库实现了对模型层级（Node Hierarchy）的深度解析。加载流程不仅提取顶点数据，还递归地计算节点间的父子变换关系，最终构建出一棵符合物理逻辑的场景树。
-
-\subsection{硬件加速的层次包围盒（BVH）架构}
-为了支撑百万级面片的实时光线追踪，\texttt{Scene} 类最核心的职责是维护一套符合 Vulkan KHR 规范的双层加速结构（Acceleration Structure）：
-
+\subsection{基于 AABB 的视锥体剔除 (Frustum Culling)}
+在光栅化阶段，盲目提交视野外的物体会导致严重的 Draw Call 开销。本文实现了基于轴对齐包围盒（AABB）的视锥体剔除算法：
 \begin{enumerate}
-    \item \textbf{底层加速结构 (BLAS)}：对应单个模型的 BVH。在模型加载时，驱动程序根据原始三角形的 AABB 自动构建最优的二叉树结构。BLAS 存储在显存中，作为静态的几何描述符。
-    \item \textbf{顶层加速结构 (TLAS)}：对应整个场景的 BVH。它本质上是一个轻量级的“实例引用表（Instance List）”。
+    \item \textbf{包围盒预计算}：在 GLTF 加载阶段，利用 \texttt{cgltf} 提取每个 Mesh 的顶点极值，构建局部 AABB。
+    \item \textbf{视锥体提取}：采用 Gribb-Hartmann 算法，直接从当前的 View-Projection 矩阵中提取 6 个裁剪平面方程。
+    \item \textbf{相交测试}：在每帧渲染前，将物体的局部 AABB 变换至世界空间，并与视锥体平面进行快速求交判定，视野外的物体将被直接跳过绘制指令的提交。
 \end{enumerate}
 
-这种“两层拓扑”的设计实现了极高的更新效率：当场景中的物体（Entity）发生平移或旋转时，其内部的几何细节（BLAS）无需变动，引擎只需在 \texttt{Scene::UpdateTLAS} 中更新对应的 4x4 变换矩阵并重构轻量级的 TLAS 节点。这种基于硬件加速的 BVH 遍历机制，使得射线与场景的求交测试（Ray-Box Intersection）能够完全由 GPU 的 RT Core 异步完成，大幅降低了 CPU 的调度负载。
+\subsection{基于静态八叉树的空间划分 (Octree)}
+当场景物体数量达到量级增长时，线性遍历所有实体进行 AABB 测试会成为 CPU 瓶颈。为此，本文引入了静态八叉树（Octree）空间划分系统：
+\begin{itemize}
+    \item \textbf{递归子分}：引擎自动计算全场景的总包围盒作为根节点，并根据物体密度递归划分为 8 个子节点（子空间）。
+    \item \textbf{层级剔除}：渲染查询时，视锥体首先与大块空间节点进行求交。若节点完全不在视野内，则直接剔除其下属的所有物体，将查询复杂度从 $O(N)$ 降低至近似 $O(\log N)$。
+\end{itemize}
+
+\subsection{硬件加速的层次包围盒 (BVH)}
+与 CPU 端侧重于“可见性判断”的八叉树不同，对于实时光线追踪（RT），引擎利用 Vulkan KHR 规范维护了一套硬件级双层加速结构：
+\begin{enumerate}
+    \item \textbf{底层加速结构 (BLAS)}：存储模型原始三角形的 BVH，由 GPU 驱动程序在模型加载时构建。
+    \item \textbf{顶层加速结构 (TLAS)}：存储场景中所有实例的引用。当物体发生移动时，仅需更新 TLAS 中的变换矩阵，无需重构复杂的 BLAS，从而保证了实时性。
+\end{enumerate}
+
+通过上述“CPU 粗筛 + GPU 精算”的混合方案，Chimera 引擎在处理复杂场景（如 Sponza 场景）时，能够有效降低 CPU 端的 API 调用负载，同时维持高性能的光线追踪查询。
 
 \section{交互式摄像机系统实现}
 

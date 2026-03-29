@@ -73,27 +73,25 @@ API 接口 & Vulkan 1.3.239 (支持 Ray Tracing KHR 扩展) \\
     \centering
     \begin{minipage}{0.48\textwidth}
         \centering
-        \includegraphics[width=\textwidth]{figures/chapter5/rt_gi_raw.png}
+        \includegraphics[width=\textwidth]{figures/chapter6/rt_gi_raw.png}
         \caption*{(a) 原始 1 SPP 输入 (极高方差噪声)}
     \end{minipage}
     \hfill
     \begin{minipage}{0.48\textwidth}
         \centering
-        % \includegraphics[width=\textwidth]{figures/chapter6/svgf_spatial_only.png}
-        \framebox[\textwidth]{\rule{0pt}{80pt} 待添加：svgf\_spatial\_only.png}
+        \includegraphics[width=\textwidth]{figures/chapter6/svgf_spatial_only.png}
         \caption*{(b) 仅开启空域滤波 (边缘模糊，纹理涂抹)}
     \end{minipage}
     \vspace{10pt}
     \begin{minipage}{0.48\textwidth}
         \centering
-        % \includegraphics[width=\textwidth]{figures/chapter6/svgf_temporal_only.png}
-        \framebox[\textwidth]{\rule{0pt}{80pt} 待添加：svgf\_temporal\_only.png}
+        \includegraphics[width=\textwidth]{figures/chapter6/svgf_temporal_only.png}
         \caption*{(c) 仅开启时域累积 (动态下出现鬼影，残留噪声)}
     \end{minipage}
     \hfill
     \begin{minipage}{0.48\textwidth}
         \centering
-        \includegraphics[width=\textwidth]{figures/chapter5/rt_gi_svgf.png}
+        \includegraphics[width=\textwidth]{figures/chapter6/rt_gi_svgf.png}
         \caption*{(d) SVGF 完整管线 (平滑重建且保留边缘细节)}
     \end{minipage}
     \caption{SVGF 时空方差引导降噪算法各模块消融对比实验}
@@ -105,7 +103,7 @@ API 接口 & Vulkan 1.3.239 (支持 Ray Tracing KHR 扩展) \\
     \item \textbf{1 SPP 输入}：原始路径追踪信号表现为严重的“椒盐噪声”，无法识别物体材质。
     \item \textbf{仅空域滤波}：在单帧信息量极低时，纯空间域的联合双边滤波为了平滑噪声，不得不跨越较大的深度差异，导致物体边缘产生严重的晕染效果。
     \item \textbf{仅时域累积}：利用历史帧有效提升了样本密度，但在物体高速运动时，由于缺乏空间邻域的插值补全，遮挡区域会出现显著的采样空洞。
-    \item \textbf{完整 SVGF}：通过时域累积稳定信号源，并利用计算出的实时方差引导多级 À-Trous 滤波器，在保留法线和深度特征的前提下实现了高质量的信号重建。
+    \item \textbf{完整 SVGF}：通过时域累积稳定信号源，并利用计算出的实时方差引导多级 A-Trous 滤波器，在保留法线和深度特征的前提下实现了高质量的信号重建。
 \end{itemize}
 
 \subsection{TAA 亚像素抖动与边缘平滑分析}
