@@ -50,7 +50,7 @@
     \end{itemize}
     \item \textbf{渲染调度层 (Renderer Layer)}：
     \begin{itemize}
-        \item \textbf{RenderGraph}：核心调度中枢，通过 DAG（有向无环图）自动推断 Pass 间的依赖关系。
+        \item \textbf{RenderGraph}：核心调度中枢。不仅通过 DAG（有向无环图）自动推断 Pass 间的依赖关系，还实现了多线程就绪的层级化调度架构（Parallel Leveling），支持在 CPU 侧进行并行的指令录制。
         \item \textbf{资源抽象}：封装了纹理（Image）、缓冲区（Buffer）及着色器（Shader）等资源对象。
     \end{itemize}
     \item \textbf{平台与硬件层 (Platform Layer)}：直接与操作系统交互。
@@ -91,6 +91,15 @@ Layer（层）是一个高度抽象的逻辑概念，它是引擎的一部分，
     \item \textbf{普通层 (Layer)}：按照添加顺序存储在容器的前半部分。例如，底层的环境背景层先添加，上层的模型层后添加。
     \item \textbf{覆盖层 (Overlay)}：始终被维护在容器的最末端。它们通常具有最高优先级，用于显示始终置顶的调试信息、性能 Overlay 或全局弹出通知。
 \end{itemize}
+
+\subsection{RenderGraph：数据驱动的渲染管线调度}
+RenderGraph 是 Chimera 引擎的“大脑”，它负责将零散的渲染 Pass 组织成一个高效的、自动同步的执行流水线。
+
+\subsubsection{声明式依赖追踪}
+与传统引擎手动管理 Vulkan 屏障不同，Chimera 采用了声明式接口。Pass 开发者只需通过 \texttt{PassBuilder} 声明资源的读写关系（如 \texttt{Read("Albedo")} 或 \texttt{Write("ShadowMap")}），由渲染图自动推导底层的 \texttt{vkCmdPipelineBarrier2}。这种设计极大降低了 Vulkan 开发中同步错误的概率。
+
+\subsubsection{自动化资源生命周期}
+通过分析资源的首次与末次使用点，RenderGraph 能够自动管理物理显存的分配与回收。这不仅简化了开发流程，还允许不同时重叠的逻辑资源复用同一块物理显存，有效降低了系统的显存峰值占用。
 
 \subsection{事件驱动与输入轮询}
 
@@ -187,21 +196,31 @@ Vulkan 的复杂度源于其对资源生命周期、内存分配以及同步机�
 Vulkan 严禁在 GPU 仍在执行渲染指令时销毁其引用的资源。为了解决 CPU-GPU 异步导致的资源竞争问题，Chimera 实现了一套延迟销毁机制（Deletion Queue）：
 当用户请求释放某个资源时，\texttt{ResourceManager} 并不会立即调用销毁函数，而是将其推入队列并标记当前的帧序号。系统会等待两到三帧（对应双重或三重缓冲的完整循环）后，确保 GPU 已经彻底释放了对该资源的引用，才会执行最终的物理清理。这一机制是引擎能够稳定运行、不发生显存溢出的关键保障。
 
-\subsection{异步资源加载与多线程调度}
-在处理 Sponza 或 Bistro 等大规模复杂场景时，同步加载机制会导致主线程在执行磁盘 IO 与几何解析时出现明显的长时间卡顿（Stall）。为了实现“零卡顿”的用户体验，Chimera 构建了一套基于任务系统（Task System）的全异步资源加载流水线。
+\section{引擎多线程架构与任务系统设计}
 
+为了充分利用现代多核 CPU 的计算性能，Chimera 引擎构建了一套贯穿“后台资源处理”与“前台指令录制”的全方位多线程架构。
+
+\subsection{多线程任务系统基础设施}
+引擎在初始化阶段会创建一个常驻线程池（Thread Pool），其工作线程数量根据宿主机的硬件核心数动态分配。通过封装 \texttt{std::future} 机制，系统提供了一个轻量级的任务调度接口，允许主线程以非阻塞的方式分发耗时的计算任务。
+
+\subsection{后台异步资源处理流水线}
+在处理大规模复杂场景时，同步加载会导致主线程出现明显的卡顿。Chimera 实现了一套四阶段异步加载流程：
 \begin{enumerate}
-    \item \textbf{多线程任务系统}：引擎在启动时初始化一个常驻线程池，根据宿主机的 CPU 核心数动态分配工作线程。通过 \texttt{std::future} 机制，主线程可以非阻塞地调度耗时的 IO 或计算任务。
-    \item \textbf{四阶段异步流水线}：我们将资源加载拆分为四个解耦阶段：
-    \begin{itemize}
-        \item \textbf{IO 与解析阶段}：在后台线程调用 \texttt{cgltf} 库读取文件并解析场景层级。
-        \item \textbf{并行解码阶段}：利用多核优势，将模型引用的数十张贴图分发至线程池并行执行图像解码（stbi\_load）。
-        \item \textbf{异步 GPU 上传}：在后台线程录制上传指令，并结合全局互斥锁（Queue Mutex）安全地向 GPU 提交数据。
-        \item \textbf{延迟集成阶段}：主线程每帧轮询任务进度，一旦后台准备就绪，仅通过廉价的指针交换与 TLAS 更新将模型挂载至场景树。
-    \end{itemize}
-    \item \textbf{外部同步机制}：由于 Vulkan 的 \texttt{VkQueue} 与描述符池是非线程安全的，引擎在 \texttt{VulkanContext} 层引入了针对队列提交的全局互斥锁，确保了多线程资源上传与主线程渲染指令提交之间的外部同步（External Synchronization），在维持高效并行的同时杜绝了校验层报错。
+    \item \textbf{IO 与解析阶段}：在后台线程调用 \texttt{cgltf} 读取文件。
+    \item \textbf{并行解码阶段}：利用多核优势，将数十张贴图分发至线程池并行解码。
+    \item \textbf{异步 GPU 上传}：在后台录制上传指令并提交。
+    \item \textbf{延迟集成阶段}：主线程每帧轮询，准备就绪后通过廉价的指针交换挂载至场景树。
 \end{enumerate}
-通过该架构，引擎实现了在复杂模型加载期间，用户依然可以流畅地操作相机、切换渲染模式，极大地提升了系统的交互响应性能。
+
+\subsection{前台并行指令录制架构}
+不同于传统的线性渲染调度，Chimera 的 RenderGraph 具备向多线程录制演进的层级化架构。
+
+\textbf{基于 DAG 的层级化调度 (Parallel Leveling)}：在渲染图编译阶段，系统通过分析资源的读写依赖（Last Writer），自动构建有向无环图。系统利用分层算法将互不冲突的 Pass 分配到相同的“并行层级”中。例如，直接光阴影图的生成与 G-Buffer 的几何采集由于不存在数据竞争，被分配在同一层级。
+
+\textbf{层级化同步与屏障批处理}：在执行阶段，系统采用“主线程同步，多线程录制”策略。主线程在每一层级开始前，统一提交该层所有 Pass 所需的资源布局转换屏障。这种设计极大压低了 CPU 侧的 API 调用负载，并为未来接入 Secondary Command Buffer 真正的并行录制奠定了逻辑基础。
+
+\subsection{多线程环境下的同步机制}
+由于 Vulkan 的部分对象（如 \texttt{VkQueue}）是非线程安全的，系统在 \texttt{VulkanContext} 层引入了全局队列互斥锁，确保了后台资源上传与前台渲染指令提交之间的外部同步。
 
 \section{场景组织与空间加速算法}
 

@@ -41,7 +41,7 @@
 \textbf{有效性校验}：为了防止在遮挡变化区域引入历史“鬼影”（Ghosting），系统执行了严格的校验。如果当前像素与历史像素的深度差异过大、法线夹角过大，或者所属的物体 Mesh ID 不一致，则判定历史失效，丢弃时域数据。
 
 \textbf{基于矩的方差估计 (Variance Estimation)}：
-若校验通过，系统采用指数移动平均（Exponential Moving Average, EMA）在时域上累积亮度的**一阶矩**（$E[L]$）与**二阶矩**（$E[L^2]$）：
+若校验通过，系统采用指数移动平均（Exponential Moving Average, EMA）在时域上累积亮度的一阶矩（$E[L]$）与二阶矩（$E[L^2]$）：
 \begin{equation}
     E[L]_t = \alpha L_t + (1 - \alpha) E[L]_{t-1}
 \end{equation}
