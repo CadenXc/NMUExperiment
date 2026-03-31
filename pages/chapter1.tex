@@ -1,77 +1,82 @@
 % !Mode:: "TeX:UTF-8"
 
-\chapter{绪论}
+\chapter{引言}
 \label{chap:introduction}
 
 \section{研究背景及意义}
-% 逻辑：实时渲染定义 -> 历史演进 -> 实时光追的兴起 -> 混合渲染的必要性
+实时渲染（Real-time Rendering）是计算机图形学中用于在极短时间内生成高质量动态图像的核心技术。随着硬件光线追踪加速核心的普及，针对混合渲染架构设计专门的引擎工具，其意义体现在以下几个方面：
 
-实时渲染（Real-time Rendering）是计算机图形学中极具挑战性的分支，其核心目标是在极短的时间窗口内（通常为 16.6ms 或 33.3ms 以内）生成高质量的图像信号，以维持人机交互的连贯性。与追求极致物理真实感但计算耗时极长的离线渲染（Offline Rendering）不同，实时渲染需要在有限的硬件资源与严苛的时间预算之间达成一种“物理正确性”与“计算吞吐量”的精妙平衡。
+\textbf{混合管线调度与同步至关重要}。混合渲染涉及光栅化与光线追踪的大量切换，其性能高度依赖于资源同步的准确性。设计高效的调度工具应能帮助开发者自动执行复杂的管线屏障推导任务，以优化显存访问，确保渲染指令能够更好地反映硬件并行特征。
 
-在过去的三十年中，基于扫描线填充的光栅化（Rasterization）技术凭借其硬件友好性与极高的执行效率，统治了实时图形领域。通过对几何图元的投影、插值与深度测试，光栅化管线能够支撑起现代大规模场景的实时呈现。然而，随着用户对视觉表现要求的不断提升，光栅化在处理全局光照、软阴影以及复杂反射等非局部光影特性时的局限性日益凸显。
+\textbf{信号降噪与画质重建同样重要}。光线追踪在 1 SPP 极端采样下会产生巨大方差噪声。因此，工具的设计需要提供高效的时空滤波算法实现，以便用户（开发者）能够直观地理解降噪过程中的权重分布与方差演变，并根据场景需要对重建参数进行灵活调整。
 
-2018 年，随着硬件光线追踪加速核心（RT Core）的问世及 Vulkan/DX12 等底层图形 API 的迭代，实时光线追踪（Real-time Ray Tracing）正式进入工程应用领域。它通过模拟光线在物理空间中的传播路径，从根本上解决了光栅化管线难以处理的可见性与遮挡难题。然而，即便在当前最先进的显卡架构下，要实现完全的实时路径追踪（Full Path Tracing）仍面临样本数极低（1 SPP）导致的噪声泛滥问题。因此，结合光栅化的高效几何提取与光线追踪的物理光影特性的“混合渲染（Hybrid Rendering）”架构，辅以高性能的时空重建算法，成为了当前学术界与工业界公认的演进方向。
+\textbf{应用开发与集成也是不可忽视的一环}：通过设计模块化的渲染引擎架构，可以降低光线追踪技术的应用门槛，使更多的图形开发者能够轻松地将混合渲染特性集成到他们的三维应用中。这对于面临大规模场景表现力不足的开发者来说尤为重要。
 
+\textbf{性能评估与优化也是设计工具时应考虑的关键因素}。工具应具备实时的耗时监测与画质对比功能，以便用户能够评估不同 Pass 的开销、识别性能瓶颈并进行针对性调整。这有助于提升系统在实际硬件上的运行效率。
+
+\section{国内外研究现状与发展}
+混合渲染技术在影视、游戏及虚拟现实领域得到了广泛应用，并且在图形学研究中仍然是一个活跃的主题。
+\begin{itemize}
+    \item \textbf{图形 API 演进}：从传统的 OpenGL 状态机演进至 Vulkan/DX12 的显式控制模式。Vulkan 1.3 引入的动态渲染特性进一步简化了管线管理。
+    \item \textbf{硬件加速技术}：NVIDIA RTX 与 AMD RDNA 架构通过专用求交单元（RT Core）大幅提升了射线追踪速度，使得实时路径追踪成为可能。
+    \item \textbf{渲染调度架构}：EA Frostbite 引擎提出的 FrameGraph 概念引领了行业趋势，现代引擎如虚幻引擎（RDG）正致力于实现更智能的资源复用与多线程录制。
+    \item \textbf{信号重建算法}：SVGF（时空方差引导滤波）及其后续变种（如 ASVGF）仍然是当前 1 SPP 降噪领域的主流方案，同时深度学习降噪（如 DLSS）也在快速发展。
+\end{itemize}
+
+\section{相关技术}
+
+\subsection{基于物理的渲染方程 (PBR)}
+给定表面点 $p$ 与出射方向 $\omega_o$，计算出射辐射度 $L_o$ 的核心方程为：
+\begin{equation}
+    L_o(p, \omega_o) = L_e(p, \omega_o) + \int_{\Omega} f_r(p, \omega_i, \omega_o) L_i(p, \omega_i) (n \cdot \omega_i) d\omega_i
+\end{equation}
+其中 $f_r$ 为双向反射分布函数（BRDF），$L_i$ 为入射光。本系统利用该物理模型确保材质表现的真实性。
+
+\subsection{混合渲染管线与 G-Buffer}
+混合渲染器结合了光栅化的高效几何提取能力与光线追踪的物理光影特性。
 \begin{enumerate}
-    \item \textbf{传统渲染技术的局限性}：探讨光栅化技术在处理全局光照、软阴影及复杂反射时的近似算法（如 SSR, Shadow Map）存在的走样与视觉断裂问题。
-    \item \textbf{硬件光线追踪的兴起}：分析 Vulkan DXR 扩展与 NVIDIA RTX 硬件加速为实时渲染带来的变革，以及“路径追踪”在实时端面临的低样本（1 SPP）噪点挑战。
-    \item \textbf{本课题的研究意义}：本文旨在通过构建一套基于数据驱动架构的混合渲染引擎，整合光栅化的速度优势与光线追踪的物理精确性，并引入时空滤波算法解决极低采样率下的图像重建问题，具有重要的工程应用价值。
+    \item \textbf{几何采集}：利用光栅化生成多附件 G-Buffer（Albedo, Normal, Depth, Motion）。
+    \item \textbf{光影预测}：基于 G-Buffer 信息发射探测射线，计算阴影与反射。
+    \item \textbf{数据合成}：将光栅化材质与光追生成的辐照度信号进行物理加权合并。
 \end{enumerate}
 
-\section{国内外研究现状}
+\subsection{SVGF 时空一致性降噪技术}
+针对 1 SPP 的蒙特卡洛噪声，系统采用 SVGF 算法。其核心在于利用时域累积（EMA）增加有效样本数：
+\begin{equation}
+    E[L]_t = \alpha L_t + (1 - \alpha) E[L]_{t-1}
+\end{equation}
+并结合 A-Trous 滤波器执行保边过滤。该算法能捕捉时序关系并利用亮度方差引导空间模糊，实现信号的高质量重建。
 
-\subsection{现代底层渲染引擎架构演进}
-% 核心点：从状态机到声明式 DAG
-
-图形 API 从 OpenGL/DirectX 11 的状态机模式演进至 Vulkan/DirectX 12 的显式控制模式，对引擎架构提出了更高要求。
+\subsection{Vulkan 显式资源管理与同步}
+Vulkan 提供了极高的硬件控制权：
 \begin{itemize}
-    \item \textbf{显式资源管理挑战}：论述手动管理 Pipeline Barrier、显存堆分配及命令缓冲提交的复杂性。
-    \item \textbf{渲染图（Render Graph）架构}：调研 EA Frostbite 引擎首次提出的 FrameGraph 概念，分析虚幻引擎（RDG）与 Unity（SRP）如何利用有向无环图（DAG）实现自动资源生命周期管理与显存别名（Memory Aliasing）优化。
+    \item \textbf{内存控制}：利用 VMA (Vulkan Memory Allocator) 进行池化管理。
+    \item \textbf{同步原语}：通过 Pipeline Barrier 实现 Image Layout 的显式转换。
+    \item \textbf{并行调度}：支持在多个 CPU 线程上录制 Command Buffer。
 \end{itemize}
 
-\subsection{实时光线追踪与混合渲染管线}
-% 核心点：G-Buffer + Ray Query/RT Pipeline
+\subsection{Dear ImGui 可视化框架}
+JavaFX 之于传统应用，Dear ImGui 之于高性能渲染器。它采用 Immediate Mode UI 思想，具备极高的实时性，支持在不影响渲染帧率的前提下，为用户提供丰富的调试控件、折线图及中间纹理的可视化输出。
 
-目前工业界公认的实时光追方案并非“全路径追踪”，而是基于混合渲染（Hybrid Rendering）的演进。
-\begin{itemize}
-    \item \textbf{延迟渲染的基石}：回顾延迟着色（Deferred Shading）在处理大规模光源时的优势。
-    \item \textbf{光追特性集成}：调研现代游戏引擎如何针对阴影（RTSH）、反射（RTR）及环境光遮蔽（RTAO）等特定环节精准触发光线探测，利用 Ray Query 技术在片段着色器中实现硬加速。
-\end{itemize}
-
-\subsection{实时信号重建与降噪算法现状}
-% 核心点：从空间滤波到时空方差引导滤波（SVGF）
-
-在 1 SPP 的极端限制下，信号重建算法是决定最终画质的关键。
-\begin{itemize}
-    \item \textbf{空间域滤波}：分析双边滤波（Bilateral Filter）及其变种在保边去噪方面的局限。
-    \item \textbf{时域反馈（Temporal Feedback）}：论述时空抗锯齿（TAA）与历史信息重投影（Reprojection）在平滑信号中的核心地位。
-    \item \textbf{SVGF 理论体系}：重点分析 2017 年提出的时空方差引导滤波（SVGF）如何通过解耦反照率（Albedo）与光照信号，利用时域梯度估计动态调整滤波器核大小。
-\end{itemize}
-
-\section{本文的主要工作与创新点}
-
-本文从零构建了一套名为“Chimera”的高性能实时混合渲染引擎，主要工作如下：
-
+\section{本文的主要工作}
+本文设计并实现了一个基于 Vulkan 的实时混合渲染引擎，本系统共包括三个大模块：
 \begin{enumerate}
-    \item \textbf{设计并实现了基于 DAG 的声明式 Render Graph}：
-    通过拓扑排序与资源引用计数，实现了 Vulkan 内存屏障的自动化插入与 Swapchain 图像布局的智能转换，极大降低了管线切换的复杂度。
-    
-    \item \textbf{构建了物理正确的混合渲染管线}：
-    基于 Vulkan 1.3 动态渲染特性，实现了结合 GLTF 2.0 模型加载、PBR 材质模型、Ray Traced 软阴影与镜面反射的高效率管线。
-    
-    \item \textbf{落地了全套时空重建与后处理系统}：
-    实现了 SVGF 降噪算法及抖动补偿的 TAA 方案，引入了基于颜色直方图裁剪（Color Clipping）的重投影优化，解决了动量失效导致的残影问题。
+    \item \textbf{资产与基础设施模块}：负责 GLTF 2.0 模型解析、异步 TaskSystem 调度及 VMA 显存管理。
+    \item \textbf{渲染调度引擎 (RenderGraph)}：实现基于 DAG 的 Pass 编排、资源生命周期分析及自动化屏障推导。
+    \item \textbf{混合计算与重建模块}：包含延迟光栅化管线、Ray Query 光追计算、SVGF 降噪及 TAA 后处理输出。
 \end{enumerate}
 
-\section{论文结构安排}
-
-本文共分为七章，具体内容安排如下：
+\section{论文总体结构}
+以下是对本论文各个章节的概要：
 \begin{itemize}
-    \item \textbf{第一章 绪论}：阐述研究背景、意义及国内外研究现状。
-    \item \textbf{第二章 实时混合渲染理论基础}：介绍 PBR 物理渲染模型（BRDF）、Vulkan 渲染机制及硬件光线追踪（AS/RT Pipeline）原理。
-    \item \textbf{第三章 引擎架构设计与底层实现}：论述引擎的分层模块化设计、Vulkan 初始化流程及 EditorCamera 交互系统的构建。
-    \item \textbf{第四章 渲染图调度与管线集成}：详细解析 Render Graph 资源依赖推导、G-Buffer 布局设计及光追/光栅化混合调度。
-    \item \textbf{第五章 信号降噪与画质增强算法实现}：深入探讨 SVGF 时空滤波细节、TAA 抖动策略、Bloom 泛光及 Tone Mapping 后处理。
-    \item \textbf{第六章 系统实验与分析}：基于 DamagedHelmet 等工业级 PBR 模型展示渲染效果，并针对不同降噪配置进行性能消融实验（Ablation Study）。
-    \item \textbf{第七章 总结与展望}：总结本文成果，指出当前系统在多弹射 GI、模型简化等方面的局限及改进方向。
+    \item \textbf{第一章 引言}：介绍实时混合渲染的研究背景、国内外现状，总结相关技术基础及本文主要工作。
+    \item \textbf{第二章 理论基础}：深入分析 PBR 物理模型、Vulkan 渲染机制及硬件光追原理。
+    \item \textbf{第三章 需求分析}：从可行性、业务流程、功能与非功能指标等方面详细阐述引擎需求。
+    \item \textbf{第四章 概要设计}：论述系统分层架构、功能模块划分及显存逻辑表结构设计。
+    \item \textbf{第五章 详细设计}：以需求为基础，对渲染图算法、光追逻辑及时空重建模型进行细致设计。
+    \item \textbf{第六章 系统实现与测试}：展示核心代码实现，通过功能测试用例与性能数据验证系统有效性。
+    \item \textbf{第七章 总结与展望}：总结全文工作并指出未来改进方向。
 \end{itemize}
+
+\section{本章小结}
+本章阐述了混合渲染引擎的研究意义，梳理了行业现状，并通过对 PBR 方程、SVGF 逻辑及 Vulkan 特性的数学与工程描述，确立了系统的技术支撑体系。最后，本章给出了论文的整体章节安排，为后续内容的展开提供了总纲。

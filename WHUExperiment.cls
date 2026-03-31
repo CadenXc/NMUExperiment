@@ -103,7 +103,7 @@
 	\vspace{0.8cm}
 	{\songti \zihao{1} \makebox[10cm][s]{本科毕业论文（设计）}}\\
     \vspace{1.0cm}
-    {\heiti \zihao{2} 题目：\underline{\@title} \par}%
+    {\heiti \zihao{2} 题目：\CJKunderline{\@title} \par}%
 %    \vspace{4.2cm}
     {\songti\zihao{-3}
     \begin{tabular}{l l}

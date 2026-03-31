@@ -1,0 +1,164 @@
+% !Mode:: "TeX:UTF-8"
+
+\chapter{系统测试与分析}
+\label{chap:evaluation}
+
+本章将对 Chimera 渲染引擎的各项核心功能进行详细的实验测试与定性、定量分析。测试重点在于验证基于光线追踪的混合渲染管线在画质表现上的物理正确性，以及 SVGF 降噪算法与 TAA 抗锯齿算法在信号重建阶段的有效性。最后，本章将通过多场景的性能剖析，探讨本系统的实时运行效率与硬件开销分布。
+
+\section{实验环境与测试场景}
+
+下面是使用的软硬件测试环境：
+
+\begin{table}[H]
+\centering
+\caption{实验环境配置汇总表}
+\label{tab:environment}
+\begin{tabular}{ll}
+\toprule
+\textbf{配置项目} & \textbf{详细规格} \\
+\midrule
+操作系统 & Windows 11 64-bit 专业版 \\
+处理器 (CPU) & AMD Ryzen 9 9955HX (16 Cores, 32 Threads) \\
+图形显卡 (GPU) & NVIDIA GeForce RTX 5070 Ti (支持 Blackwell 架构) \\
+显存 (VRAM) & 32GB GDDR \\
+API 接口 & Vulkan 1.3.239 (支持 Ray Tracing KHR 扩展) \\
+开发环境 & Visual Studio Code / CMake 3.25 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+本章主要选取了工业级 PBR 基准模型 \textbf{DamagedHelmet} 进行深度测试。相比于大场景，该模型包含了极其丰富的金属、粗糙度及高精度法线贴图，能够更精准地验证混合渲染管线在 PBR 材质重建、微表面光泽反射以及 1 SPP 极端采样下的降噪稳定性。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/chapter5/editor_interface_full.png}
+    \caption{Chimera 引擎在 DamagedHelmet 模型下的混合渲染最终输出效果}
+    \label{fig:overview}
+\end{figure}
+
+
+\section{混合管线画质定性分析}
+
+\subsection{光栅化与光线追踪的光影正确性对比}
+
+通过对比传统光栅化渲染与基于光线追踪的混合渲染结果（图 \ref{fig:rt_vs_raster}），本系统展现了显著的物理正确性优势：
+
+\begin{enumerate}
+    \item \textbf{接触硬化阴影 (Contact Hardening Shadows)}：传统 Shadow Map 生成的阴影边缘具有恒定的软硬度。而基于 Ray Query 的光追阴影能够模拟面光源的半影效果，阴影在靠近遮挡物处非常锐利，随距离增加而自然模糊，完美复现了接触硬化现象。
+    \item \textbf{非视口内反射 (Off-screen Reflections)}：如图 \ref{fig:rt_vs_raster}(b) 所示，传统的屏幕空间反射（SSR）无法渲染摄像机视野外的物体（如身后或侧方的梁柱），而本系统的光线追踪反射通过遍历加速结构，能够正确反射全场景任意位置的几何体。
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/compare_forward_raster.png}
+        \caption*{(a) 传统光栅化方案 (Shadow Map)}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/compare_forward_final.png}
+        \caption*{(b) 本文光线追踪方案 (RT Shadows/Reflections)}
+    \end{minipage}
+    \caption{光栅化渲染与光线追踪混合渲染的画质定性对比}
+    \label{fig:rt_vs_raster}
+\end{figure}
+
+\subsection{SVGF 降噪模块的时空消融实验}
+
+为了验证 SVGF 降噪管线中各核心模块的有效性，本节对 1 SPP 原始信号进行了消融实验分析（图 \ref{fig:svgf_ablation}）：
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter6/rt_gi_raw.png}
+        \caption*{(a) 原始 1 SPP 输入 (极高方差噪声)}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter6/svgf_spatial_only.png}
+        \caption*{(b) 仅开启空域滤波 (边缘模糊，纹理涂抹)}
+    \end{minipage}
+    \vspace{10pt}
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter6/svgf_temporal_only.png}
+        \caption*{(c) 仅开启时域累积 (动态下出现鬼影，残留噪声)}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter6/rt_gi_svgf.png}
+        \caption*{(d) SVGF 完整管线 (平滑重建且保留边缘细节)}
+    \end{minipage}
+    \caption{SVGF 时空方差引导降噪算法各模块消融对比实验}
+    \label{fig:svgf_ablation}
+\end{figure}
+
+实验分析表明：
+\begin{itemize}
+    \item \textbf{1 SPP 输入}：原始路径追踪信号表现为严重的“椒盐噪声”，无法识别物体材质。
+    \item \textbf{仅空域滤波}：在单帧信息量极低时，纯空间域的联合双边滤波为了平滑噪声，不得不跨越较大的深度差异，导致物体边缘产生严重的晕染效果。
+    \item \textbf{仅时域累积}：利用历史帧有效提升了样本密度，但在物体高速运动时，由于缺乏空间邻域的插值补全，遮挡区域会出现显著的采样空洞。
+    \item \textbf{完整 SVGF}：通过时域累积稳定信号源，并利用计算出的实时方差引导多级 A-Trous 滤波器，在保留法线和深度特征的前提下实现了高质量的信号重建。
+\end{itemize}
+
+\subsection{TAA 亚像素抖动与边缘平滑分析}
+
+本系统引入 TAA（Temporal Anti-Aliasing）作为最后的重建阶段。通过亚像素级的 Jitter 抖动采样与时域色彩裁剪（Color Clipping）技术，系统显著消除了光栅化阶段产生的几何走样（图 \ref{fig:taa_comparison}）。
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/taa_comparison_off.png}
+        \caption*{(a) 开启 TAA 前 (高频锯齿明显)}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/taa_comparison_on.png}
+        \caption*{(b) 开启 TAA 后 (边缘平滑，亚像素细节增加)}
+    \end{minipage}
+    \caption{TAA 算法开启前后的边缘抗锯齿效果对比}
+    \label{fig:taa_comparison}
+\end{figure}
+
+
+\section{渲染性能与耗时定量分析}
+
+\subsection{渲染阶段 GPU 耗时分布}
+
+本系统利用 Vulkan 原生的 Timestamp Queries 提取了各渲染阶段在 2560$\times$1440 (2K) 分辨率下的绝对执行时间。在 DamagedHelmet 场景（约 10 万面几何细节）下的实测数据如表 \ref{tab:gpu_timing} 所示。
+
+\begin{table}[H]
+\centering
+\caption{混合渲染管线 GPU 各核心阶段耗时统计 (2K 分辨率)}
+\label{tab:gpu_timing}
+\begin{tabular}{lcc}
+\toprule
+\textbf{渲染阶段 (Render Pass)} & \textbf{平均耗时 (ms)} & \textbf{耗时占比 (\%)} \\
+\midrule
+G-Buffer 几何采集阶段 & 0.85 & 6.8\% \\
+Ray Query 直接光阴影 & 1.80 & 14.3\% \\
+RT Indirect GI (1 SPP) & 4.50 & 35.7\% \\
+SVGF 时空滤波重建 & 2.45 & 19.4\% \\
+TAA + 后期后处理 & 1.10 & 8.7\% \\
+RenderGraph 调度与资源同步 & 1.90 & 15.1\% \\
+\midrule
+\textbf{单帧总渲染时长} & \textbf{12.60 ms} & \textbf{100.0\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{性能结果总结与分析}
+
+基于上述实验数据，我们可以得出以下关键结论：
+\begin{enumerate}
+    \item \textbf{计算开销占比平衡}：尽管光线追踪（GI）计算依然是管线中最沉重的部分（占比约 41\%），但通过 1 SPP 低采样率设计，系统成功将总渲染时间控制在 16.6ms（60 FPS）以内。
+    \item \textbf{降噪器性价比高}：比如SVGF 降噪算法仅用了不到 2.5ms 的开销，便将 1 SPP 的极度噪声图像重建到了接近离线路径追踪的视觉效果。相比于通过增加射线数量来降低噪声，降噪算法实现了量级的效率提升。
+    \item \textbf{带宽瓶颈与优化}：由表可见，RenderGraph 调度与同步开销（10.2\%）不容忽视。这主要源于混合管线中频繁的图像布局转换（Layout Transition）与缓存刷新。通过在 RenderGraph 中实现更细粒度的屏障合并，该项开销仍有进一步优化的空间。
+\end{enumerate}

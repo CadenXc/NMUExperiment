@@ -1,0 +1,197 @@
+% !Mode:: "TeX:UTF-8"
+
+\chapter{后期处理与信号重建}
+\label{sec:post_processing}
+
+本章将从信号处理的理论视角出发，探讨实时图形渲染中走样（Aliasing）与噪声（Noise）的产生原因。随后将详细阐述 Chimera 引擎如何实现 SVGF 降噪算法与 TAA 抗锯齿算法，在低采样频率下重建高质量的连续图像信号，并最终通过后期处理提供图像表现。
+
+\section{信号采样与抗锯齿理论基础}
+
+图形渲染的本质是将连续的几何描述转化为离散的像素表示，这一过程在信号处理领域被称为“采样”。
+
+\subsection{光栅化中的离散采样与锯齿现象}
+在光栅化阶段，系统对每个三角形进行覆盖测试。由于像素中心点的分布是离散的，当三角形的边缘斜向穿过像素阵列时，生成的着色像素点会呈现断断续续的阶梯状，这种现象被称为**锯齿（Jaggies）**。在信号处理中，这种由于采样频率不足导致的失真统称为**走样（Aliasing）**。
+
+走样的根本原因在于：信号变化的频率过高（高频信号），而采样的频率过慢，导致采样后的信号发生频谱混叠（Mixed Frequency Contents）。为了减少走样，通常遵循“先模糊，再采样”的**预滤波（Pre-Filtering）**原则。
+
+\subsection{光线追踪中的蒙特卡洛噪声}
+不同于光栅化的几何走样，实时光线追踪在 1 SPP 采样率下表现为严重的**蒙特卡洛噪声**。由于每像素仅发射一根射线，采样结果在统计上具有极大的方差。这种随机噪声在视觉上表现为密集的噪点，其本质是离散采样对高频辐照度信号的欠采样。因此，在进行最终图像合成前，必须首先执行信号降噪重建。
+
+\section{SVGF 时空方差引导降噪算法实现}
+
+针对 1 SPP 采样率下极高的蒙特卡洛噪声，本系统实现了一套完整且高效的 SVGF（Spatiotemporal Variance-Guided Filtering）降噪管线。其整体架构与数据流转如图 \ref{fig:svgf_pipeline} 所示。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/chapter5/svgf_pipeline_data_flow.png}
+    \caption{SVGF 降噪算法整体架构与数据流转示意图}
+    \label{fig:svgf_pipeline}
+\end{figure}
+
+根据 SVGF 核心理论，本系统的信号重建包含三个主要步骤：时域累积（Temporal Accumulation）以增加有效采样率；利用累积的颜色样本估计局部亮度方差（Variance Estimation）；最后利用该方差引导层次化的 À-Trous 空间小波滤波。
+
+\subsection{光照分离与反照率解耦 (Albedo Demodulation)}
+为了更好地保留场景细节，我们的路径追踪器分别输出直接光照（Direct Illumination）和间接光照（Indirect Illumination）。这种分离使得滤波器能够独立评估两个分量的局部平滑性，并更好地重构采样不良的阴影边缘。虽然分离处理看似让滤波成本翻倍，但由于这两步共享了光栅化生成的 G-Buffer（如法线、深度），实际的额外开销被大幅分摊。
+
+在进入降噪器前，系统执行反照率解耦（Demodulate Albedo），将光照计算结果除以表面基础色（Albedo）。这一策略确保了随后的时空滤波仅作用于纯粹的辐照度信号上，防止高频纹理被平滑掉；在流水线末端，再将降噪后的信号与反照率重新调制（Re-modulate），从而在抹平噪声的同时保证纹理的绝对锐利。
+
+\subsection{时域滤波与方差估计 (Temporal Filtering \& Variance)}
+降噪的第一阶段是利用跨帧一致性来提升信噪比。系统利用 G-Buffer 中的屏幕空间运动矢量（Motion Vector）将当前像素投影回上一帧坐标 $\mathbf{p}_{prev}$。
+
+\textbf{有效性校验}：为了防止在遮挡变化区域引入历史“鬼影”（Ghosting），系统执行了严格的校验。如果当前像素与历史像素的深度差异过大、法线夹角过大，或者所属的物体 Mesh ID 不一致，则判定历史失效，丢弃时域数据。
+
+\textbf{基于矩的方差估计 (Variance Estimation)}：
+若校验通过，系统采用指数移动平均（Exponential Moving Average, EMA）在时域上累积亮度的一阶矩（$E[L]$）与二阶矩（$E[L^2]$）：
+\begin{equation}
+    E[L]_t = \alpha L_t + (1 - \alpha) E[L]_{t-1}
+\end{equation}
+\begin{equation}
+    E[L^2]_t = \alpha L_t^2 + (1 - \alpha) E[L^2]_{t-1}
+\end{equation}
+其中混合权重 $\alpha$ 取决于历史有效样本数 $N$：$\alpha = \max(1/N, 0.05)$。利用统计学公式，可以实时估算每个像素的亮度方差 $\sigma^2$：
+\begin{equation}
+    \sigma^2 = \text{Var}(L) = E[L^2] - (E[L])^2
+\end{equation}
+该方差数据是 SVGF 算法的“灵魂”。若遇到历史失效（如物体刚移入视野），系统会退化为使用一个 $7 \times 7$ 的双边滤波器在空间域对局部方差进行快速预估：
+\begin{equation}
+    \sigma^2_{spatial}(p) = \frac{\sum_{q \in \mathcal{N}_7} w(p, q)^2 \cdot \text{Var}(q)}{\left(\sum_{q \in \mathcal{N}_7} w(p, q)\right)^2}
+\end{equation}
+防止运动初期产生剧烈闪烁。如图 \ref{fig:variance_map} 所示，方差图清晰地揭示了场景中采样不足的高噪点区域。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/chapter5/svgf_variance_map.png}
+    \caption{实时估算的亮度方差图 (Variance Map)，用于引导后续的空间滤波}
+    \label{fig:variance_map}
+\end{figure}
+
+\subsection{空间滤波：联合双边 A-Trous 小波变换}
+在获取了初步平滑的信号和方差后，系统在 Compute Shader 中执行空间滤波。常规的均匀模糊（如高斯滤波）虽然能去除高频噪声，但会丢失高频几何与光影细节，导致画面过度模糊。
+
+\textbf{A-Trous 跨步滤波}：为了在保持常数级计算开销的同时获取巨大的感受野，滤波器采用 A-Trous（带孔小波）结构，执行 5 轮迭代。对于第 $i$ 层滤波，其离散卷积定义为：
+\begin{equation}
+    \bar{C}_{i+1}(p) = \sum_{q \in \mathcal{N}_5} h(q) \cdot C_i(p + q \cdot 2^i)
+\end{equation}
+其中 $h(q)$ 为 $5 \times 5$ 的 B-spline 滤波核，采样步长随迭代次数 $i$ 呈 $2^i$ 指数增长。
+
+\textbf{联合双边滤波 (Joint Bilateral Filtering)}：
+为了解决过度模糊问题，SVGF 引入了联合双边滤波。在交叉采样时，最终的像素权重 $w(p, q)$ 由三部分边缘停止函数（Edge-stopping functions）组成：
+\begin{equation}
+    w(p, q) = \exp \left( -\frac{|z(p)-z(q)|}{\sigma_z \cdot |\nabla z(p) \cdot (p-q)| + \epsilon} - \frac{\|\mathbf{n}_p-\mathbf{n}_q\|}{\sigma_n} - \frac{|L(p)-L(q)|}{\sigma_l \sqrt{\text{FilteredVar}(p)} + \epsilon} \right)
+\end{equation}
+\begin{itemize}
+    \item \textbf{深度权重}：利用视图空间的线性深度梯度进行归一化，防止跨越几何边界。
+    \item \textbf{法线权重}：计算法线之间的欧氏距离，防止平滑转角。
+    \item \textbf{亮度权重}：这是由方差引导的核心。两像素亮度的差异差需要结合当前方差 $\sigma$ 进行归一化评估。在方差极大（噪声强）的区域，衰减会变得平缓，允许更大范围的混合；在方差极小（已收敛）的区域，衰减会变得非常陡峭，严格阻止颜色混合，从而保留光影梯度。
+\end{itemize}
+
+此外，在对颜色进行滤波的同时，系统也采用权重平方对像素方差进行同步滤波，确保了降噪过程在统计意义上的自洽性。系统实现了在极低采样率下对间接光照的高质量重建（图 \ref{fig:gi_denoise_compare}）。
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/rt_gi_raw.png}
+        \caption*{(a) 原始 1 SPP 间接光照 (高方差噪声)}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/rt_gi_svgf.png}
+        \caption*{(b) SVGF 滤波后结果 (平滑且保留细节)}
+    \end{minipage}
+    \caption{间接光照信号在 SVGF 降噪前后的对比分析}
+    \label{fig:gi_denoise_compare}
+\end{figure}
+
+\section{时域抗锯齿（TAA）方案实现}
+
+在 SVGF 完成了光照信号的初步重建后，画面虽然消除了噪点，但光栅化带来的几何边缘锯齿依然存在。本系统随后引入 TAA 方案，利用时域冗余信息在合成后的图像上执行二次重建。
+
+\subsection{TAA 基本原理}
+时域抗锯齿（Temporal Anti-Aliasing, TAA）是一种通过重复利用先前渲染帧的信息来去除当前帧锯齿的空间抗锯齿技术。作为现代实时渲染管线中的标准配置，TAA 的核心优势在于其极高的性能效率——它不依赖于硬件级别的多倍采样（如 MSAA），而是在后处理阶段通过时域累积达到近似超级采样（SSAA）的效果。
+
+TAA 的技术特征可以总结如下：
+\begin{itemize}
+    \item \textbf{优势}：计算开销极低，不依赖高昂的硬件配置；能有效消除亚像素级别的闪烁，对光亮细节有良好的稳定作用。
+    \item \textbf{缺陷}：由于涉及历史帧混合，容易导致模型边缘及纹理变模糊；在物体高速运动或遮挡变化时，会产生明显的“虚影”（Ghosting）现象。
+\end{itemize}
+
+\subsection{亚像素抖动与采样对齐 (Sub-pixel Jitter)}
+为了在时域上获取亚像素级别的几何覆盖信息，系统在投影矩阵中引入了微小的偏移，即亚像素抖动（Jitter）。本系统采用低差异序列（Halton Sequence）生成采样点 $\mathbf{J}_c$。Halton 序列基于质数 $b$ 定义为：
+\begin{equation}
+    H(n, b) = \sum_{i=0}^k a_i b^{-(i+1)}
+\end{equation}
+其中 $n = \sum a_i b^i$。我们在 $X$ 和 $Y$ 维度分别选取基数 2 和 3 来生成分布均匀的亚像素点。
+
+在渲染阶段，抖动量 $\mathbf{J}_c$ 直接作用于裁剪空间（NDC）。为了保证后续时域累积的数学一致性，在计算当前帧的采样邻域（用于构建包围盒）时，必须执行“反抖动”校正：
+\begin{equation}
+    \mathbf{uv}_{unjittered} = \mathbf{uv}_{current} - \mathbf{J}_c
+\end{equation}
+该步骤确保了空间搜索范围始终是以物体的真实几何中心为基准，避免了由于抖动导致的包围盒错位，从而防止历史像素被错误剔除。
+
+\subsection{速度扩张与最近深度启发式搜索 (Velocity Dilation)}
+由于几何边缘像素往往包含背景和前景的混合，直接采样当前像素的运动矢量 $\mathbf{v}$ 可能导致回溯到错误的历史位置。本系统实现了一种基于深度的速度扩张（Velocity Dilation）策略。
+
+在 $3 \times 3$ 邻域内，系统寻找与相机距离最近的像素深度值。考虑到本引擎采用了 **Reversed-Z** 深度缓冲技术（即 1.0 代表近平面，0.0 代表远平面），搜索逻辑被定义为寻找邻域内的最大深度值：
+\begin{equation}
+    \mathbf{p}_{closest} = \arg\max_{q \in \mathcal{N}_3(p)} \{ \text{Depth}(q) \}
+\end{equation}
+利用该最邻近点的运动矢量 $\mathbf{v}(\mathbf{p}_{closest})$ 进行回溯采样，能确保物体边缘的抗锯齿效果受到前景运动的正确引导，显著减少了运动过程中的拖影与边缘断裂现象。
+
+\subsection{基于射线相交的历史帧裁剪 (Ray-Box Clipping)}
+为了解决 TAA 常见的“鬼影”问题，系统必须将历史像素颜色限制在当前邻域的颜色范围内。本系统采用了一种比传统 Clamp 算法更稳健的**射线相交裁剪（Ray-Box Clipping）**方案。
+
+首先，在 YCoCg 色彩空间内计算当前像素邻域的均值 $\mu$ 与方差 $\sigma$，构建动态 AABB 包围盒 $[\mu - k\sigma, \mu + k\sigma]$。裁剪逻辑不再是简单的分量截断，而是计算从历史颜色指向邻域均值的射线与 AABB 包围盒的交点：
+\begin{equation}
+    \mathbf{C}_{clipped} = \text{lerp}(\mathbf{C}_{history}, \mu, t)
+\end{equation}
+其中 $t$ 是射线进入 AABB 盒子的交点参数。这种方法能沿着颜色向量进行精确缩放，在抑制色彩漂移的同时，最大限度地保留了历史帧中的高频细节。
+
+\subsection{渲染图驱动的历史反馈环路 (Temporal Feedback Loop)}
+TAA 的有效累积依赖于稳定的跨帧数据流转。基于本系统设计的 Render Graph 架构，我们实现了自动化的 Ping-Pong 资源管理机制。
+
+通过在 \texttt{PassBuilder} 中声明 \texttt{ReadHistory("TAAOutput")} 与 \texttt{SaveAsHistory("TAAOutput")}，渲染图自动处理了物理图像在双缓冲区间的角色切换（Ping-Pong Swap）与布局转换。为了解决计算着色器在采样持久化资源时的状态冲突，系统在 \texttt{ReadHistory} 接口中实现了底层的图像布局同步（Layout Synchronization），确保了 Vulkan 采样器始终能以 \texttt{SHADER\_READ\_ONLY\_OPTIMAL} 布局获取稳定一致的历史输入，从而支撑起无限长的时域反馈链条。
+
+\subsection{自适应混合与结果合成}
+最后一步是将处理后的历史颜色与当前帧颜色进行混合。本系统采用指数移动平均（Exponential Moving Average, EMA）模型进行最终合成：
+\begin{equation}
+    \mathbf{C}_{final} = \beta \mathbf{C}_{current} + (1 - \beta) \mathbf{C}_{history\_clipped}
+\end{equation}
+其中 $\beta$ 为自适应混合因子。本系统引入了基于运动矢量的自适应逻辑：
+\begin{equation}
+    \beta = \text{clamp}(0.1 + \text{length}(\mathbf{v}) \cdot 0.1, 0.1, 0.9)
+\end{equation}
+当物体的运动速度较快时，系统会增大混合因子 $\beta$，使其更倾向于使用当前像素的值以减少重投影误差；反之则减小 $\beta$ 以增强抗锯齿平滑效果。图 \ref{fig:taa_result} 展示了 TAA 在消除边缘锯齿方面的显著效果。
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/taa_comparison_off.png}
+        \caption*{(a) 未开启 TAA (几何边缘锯齿明显)}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chapter5/taa_comparison_on.png}
+        \caption*{(b) 开启 TAA (边缘平滑且细节增强)}
+    \end{minipage}
+    \caption{TAA 算法对几何走样与纹理闪烁的抑制效果对比}
+    \label{fig:taa_result}
+\end{figure}
+
+值得注意的是，深度学习超级采样（如 NVIDIA DLSS）利用机器学习来预测当前帧与过去帧的采样混合，它可以被看作是时域抗锯齿技术在人工智能时代的深度演进，能够更智能地处理重投影失效区域。
+
+\section{后期影像流水线与电影级合成}
+
+在所有信号重建任务完成后，后期处理通道（PostProcessPass）要做最后的显示映射：
+
+\subsection{光学抖动还原与色调映射}
+由于 TAA 引入了子像素抖动，Pass 首先执行反向位移以稳定画面。随后，采用 **ACES Filmic** 色调映射算法，将 HDR 空间的高动态范围数据映射到显示器可表现的范围，赋予画面良好的对比度与细节表现。
+
+\subsection{曝光补偿与伽马校正（Gamma Correction）}
+最后，系统应用用户定义的曝光系数，并执行 $\text{Output} = \text{Input}^{1/2.2}$ 的伽马校正。该步骤补偿了显示设备的非线性特性，确保最终输出的颜色符合人类视觉感知习惯。
+
+\section{本章小结}
+本章从信号处理的视角构建了完整的图像重建链路：首先通过 SVGF 降噪算法消除了光追引起的随机噪声，随后利用 TAA 算法处理几何边缘的采样走样，最后经由后期处理流水线实现了抗锯齿等图像优化。

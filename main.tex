@@ -83,13 +83,13 @@
 
 \Ccoursename{计算机科学与工程学院} % 映射为学院名称
 \Cmajor{软件工程} % 专业名称
-\title{基于 Vulkan 的实时光线追踪混合渲染器实现} % 论文题目
+\title{基于Vulkan的实时光线追踪混合渲染器实现} % 论文题目
 \Etitle{Implementation of a Real-time Ray Tracing Hybrid Renderer Based on Vulkan} % 英文题目
 \author{向晨} % 学生姓名
 \CstudentNum{20221889} % 学号
 \Csupervisor{韩强} % 校内指导教师
-\CsupervisorAnother{（无）} % 企业/校外指导教师 
-\date{二〇二六年五月十五日} % 论文提交时间
+\CsupervisorAnother{} % 企业/校外指导教师 
+\date{}%%二〇二六年五月十五日} % 论文提交时间
 
 %-----------------------------------------------------------------------------
 
@@ -117,19 +117,25 @@
 
 %此处书写正文-------------------------------------------------------------------------------------
 
-\include{pages/chapter1.tex}
-\include{pages/chapter2.tex}
-\include{pages/chapter3.tex}
-\include{pages/chapter4.tex}
-\include{pages/chapter5.tex}
-\include{pages/chapter6.tex}
-\include{pages/chapter7.tex}
+\include{pages/chapter1.tex} % 第一章 引言
+\include{pages/chapter2.tex} % 第二章 实时混合渲染理论基础 (保留原内容)
+\include{pages/chapter3.tex} % 第三章 需求分析
+\include{pages/chapter4.tex} % 第四章 概要设计
+\include{pages/chapter5.tex} % 第五章 详细设计
+\include{pages/chapter6.tex} % 第六章 系统实现与测试
+\include{pages/chapter7.tex} % 结束语 
 
 
 %此处结束正文-------------------------------------------------------------------------------------------------
 
 %%%=== 致谢 ========%%%
 \include{pages/acknowledgement}
+
+%%%--- 原有技术章节移动至此处作为参考 (待后续合并) ---
+% \include{pages/old_chapter3.tex} % 渲染器架构 (原 chapter3)
+% \include{pages/old_chapter4.tex} % 混合渲染管线 (原 chapter4)
+% \include{pages/old_chapter5.tex} % 后期处理 (原 chapter5)
+% \include{pages/old_chapter6.tex} % 系统测试 (原 chapter6)
 
 %%%=== 参考文献 ========%%%
 \cleardoublepage\phantomsection
