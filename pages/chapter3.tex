@@ -3,7 +3,7 @@
 \chapter{需求分析}
 \label{chap:requirements}
 
-本章将从渲染引擎工程实现的角度对 Chimera 混合渲染系统进行需求分析。通过对可行性、业务流程及功能/非功能需求的梳理，确立系统在图形表现、调度效率及用户交互方面的具体基准。
+本章将从软件工程的角度对 混合渲染引擎进行需求分析。通过对可行性、业务流程及功能/非功能需求的梳理，确立系统在图形表现、调度效率及用户交互方面的具体基准。
 
 \section{可行性分析}
 
@@ -11,47 +11,45 @@
 本项目完全基于开源生态构建，核心开发环境与依赖库均具有较高的经济效益：
 \begin{itemize}
     \item \textbf{开发成本}：Vulkan SDK、CMake、编译器（MSVC/GCC）以及图形驱动开发工具均可免费获取，无需支付商业许可证费用。
-    \item \textbf{开源库集成}：集成了 GLFW（窗口管理）、Dear ImGui（UI 界面）、GLM（数学库）及 VMA（显存管理）等成熟开源方案，规避了购买闭源引擎或第三方中间件的高昂费用。
-    \item \textbf{硬件成本}：随着实时光线追踪显卡（RTX 系列）的普及，主流消费级硬件即可作为研发平台，研发设备投入处于合理区间，具有较高的投入产出比。
+    \item \textbf{开源库集成}：集成了 GLFW、Dear ImGui、GLM及 VMA等开源领域流行的库，本身的开源证书限制较小，不要求支付版权费用。
+    \item \textbf{硬件成本}：随着实时光线追踪显卡（RTX 系列）的普及，主流消费级硬件即可作为研发平台，研发设备投入处于合理区间。
 \end{itemize}
 
 \subsection{技术可行性}
 \begin{itemize}
     \item \textbf{标准支持}：系统基于 Vulkan 1.3 标准及 KHR Ray Tracing 扩展，利用 C++20 现代特性实现。当前硬件架构已提供成熟的硬加速求交单元（RT Core）。
-    \item \textbf{架构保障}：通过 RenderGraph 声明式接口抽象了复杂的屏障同步与显存管理，降低了底层驱动开发的难度。
-    \item \textbf{调试工具}：利用 Vulkan 验证层（Validation Layers）及 RenderDoc 调试工具，可实现对显存泄露、指令竞态及像素流水线的精确追踪，确保技术方案的落地性。
+    \item \textbf{知识获取}：Vulkan 的官方文档、开源引擎的源码以及学术论文为技术实现提供了丰富的参考资料。
+    \item \textbf{开发工具}：目前的Visual Studio, Visual Studio Code等 集成开发环境都能提供良好的开发环境，各种开源库也能支持引擎的资源加载，图像界面，输入输出等功能。利用 Vulkan 验证层（Validation Layers）及 RenderDoc 调试工具，方便调试。
 \end{itemize}
 
 \subsection{操作可行性}
 \begin{itemize}
-    \item \textbf{交互直观性}：系统集成可视化 UI 调试面板，用户可实时通过滑块调节降噪系数、材质属性及光路深度，实现了“所见即所得”的操作体验。
-    \item \textbf{交互控制}：内置弧球（Arcball）相机系统，支持直观的旋转、平移及缩放操作，降低了用户观察复杂 3D 场景的难度。
-    \item \textbf{跨平台兼容}：采用 CMake 构建系统，确保了代码在 Windows 与 Linux 环境下具有一致的编译与运行体验。
+    \item \textbf{交互直观性}：系统集成可视化 UI 调试面板，用户可实时通过UI界面，查看Debug信息，加载模型，移动光源，设置调试参数，以快速验证渲染的效果。
+    \item \textbf{交互控制}：参考成熟的游戏引擎的相机，交互的实现，降低用户的操作门槛。
 \end{itemize}
 
 \section{系统业务流程分析}
-Chimera 混合渲染器的业务流程如下所述：
+本混合渲染器的业务流程如下所述：
 \begin{enumerate}
-    \item \textbf{运行应用}：启动沙盒（Sandbox）程序，初始化 Vulkan 上下文与图形驱动环境。
-    \item \textbf{场景加载与解析}：用户通过配置文件或 UI 指定 GLTF 模型路径，系统自动触发异步 IO 流水线完成几何解析与纹理并行解码。
-    \item \textbf{渲染节点构建}：系统根据用户选定的渲染路径（光栅化、混合路径或光追路径）自动构建 RenderGraph 拓扑图。
-    \item \textbf{交互调优}：用户通过菜单栏切换不同的渲染模块，实时调整 SVGF 降噪参数、TAA 开关或材质 PBR 参数。
-    \item \textbf{数据反馈与可视化}：系统在主界面反馈高质量合成图像，同时在调试层显示 G-Buffer 分量预览、纳秒级耗时统计及显存占用状态。
+    \item \textbf{运行应用}：启动渲染器，初始化 Vulkan 上下文与图形驱动环境，加载窗口界面。
+    \item \textbf{场景加载与解析}：用户通过UI 界面选择3D模型和天空盒，引擎会后台自动进行资源加载与解析。
+    \item \textbf{渲染节点构建}：系统根据用户选定的渲染路径（光栅化、混合路径或光追路径）自动构建 RenderGraph 拓扑图，分配资源和 Pass。
+    \item \textbf{交互调优}：用户通过菜单栏切换不同的渲染模块，实时调整光线方向， SVGF、TAA 开关，通过键盘鼠标调整相机位置和远近。
+    \item \textbf{数据反馈与可视化}：系统在主界面生成图像，同时在可以选择中间视图，方便查看每个阶段的效果，以及耗时统计等 Debug信息。
 \end{enumerate}
 
 \section{系统功能性需求分析}
-Chimera 混合渲染系统在设计时以图形开发者和环境艺术家为核心用户，基于其在场景搭建、效果调优及性能监控中的需求进行功能分析。以下 3.3.1 小节详细描述了用户的具体功能需求。
+混合渲染器在设计时以图形开发者和环境艺术家为核心用户，基于其在场景搭建、效果调优及性能监控中的需求进行功能分析。以下 3.3.1 小节详细描述了用户的具体功能需求。
 
 \subsection{用户功能需求}
 用户作为系统的核心操作者，应具有如下功能：
 
 \subsubsection{场景与资产管理模块}
-该模块允许用户对 3D 场景及其组成资产进行全生命周期的管控：
+该模块负责对渲染场景中的 3D 资产及其空间属性进行直观管理：
 \begin{itemize}
-    \item \textbf{资产导入}：用户可以从本地文件系统加载标准 GLTF 2.0 格式的模型资源，系统需支持异步 IO 以防止界面卡顿。
-    \item \textbf{实体层级管理}：用户可以通过 Hierarchy 面板浏览场景中的实体，选择特定的实例进行操作，并可以安全地移除不需要的实体（Remove Selected）。
-    \item \textbf{变换编辑}：用户可以实时修改选中实体的平移（Position）、旋转（Rotation）和缩放（Scale）参数。
-    \item \textbf{材质实时调优}：用户可以访问材质属性表，动态调整基础色（Albedo）、粗糙度（Roughness）、金属度（Metallic）及自发光强度等 PBR 参数。
+    \item \textbf{资源浏览与加载}：系统自动扫描指定目录下的模型与环境贴图。用户通过资源浏览器（Content Browser）可在多个 GLTF 模型间切换加载，并支持一键更换 HDR 环境天空盒。
+    \item \textbf{场景层级管理}：用户通过层级面板（Hierarchy）实时查看当前场景中的所有实体对象，支持选中特定实例以进行后续操作，并提供安全移除选定实体的功能。
+    \item \textbf{变换编辑}：支持对选中实体的平移（Position）、旋转（Rotation）和缩放（Scale）参数进行实时数值调节，并同步更新底层的硬件加速结构（AS）。
 \end{itemize}
 
 \begin{figure}[H]
@@ -61,33 +59,34 @@ Chimera 混合渲染系统在设计时以图形开发者和环境艺术家为核
     \label{fig:scene_usecase}
 \end{figure}
 
-\subsubsection{渲染控制与参数配置模块}
-用户可以对渲染管线进行深度定制，实现画质与性能的平衡：
+\subsubsection{Debug UI界面}
+用户可以对渲染管线和环境光照进行深度定制，以达到最佳的画质表现：
 \begin{itemize}
-    \item \textbf{渲染路径切换}：用户可以在实时光栅化（Forward）、混合渲染（Hybrid）及参考路径追踪（Ray Traced）模式间进行平滑切换。
-    \item \textbf{光线追踪增强控制}：用户可以独立开启或关闭硬加速阴影（Shadows）、环境光遮蔽（AO）、镜面反射（Reflections）及全局光照（Diffuse GI）。
-    \item \textbf{降噪系统配置}：用户可以控制 SVGF 降噪网络的介入，分别开启时域累积（Temporal）与多轮空域滤波（Spatial A-Trous）。
-    \item \textbf{后期效果处理}：用户可以开启 TAA 抗锯齿，并调节 ACES 曝光度和伽马校正因子。
+    \item \textbf{渲染路径与视图切换}：用户可以在光栅化（Forward）、混合渲染（Hybrid）及路径追踪模式间实时切换。提供多种种可视化模式，允许用户查看 Albedo、法线、材质参数、运动矢量以及 SVGF 方差图等中间附件。
+    \item \textbf{渲染调试控制}：提供对光线追踪阴影、反射等独立控制的开关。针对信号重建，支持对 SVGF 时空降噪，TAA 抗锯齿等开关以查看效果。。
+    \item \textbf{光源控制}：支持对主光源的方向、颜色进行调节，加载环境光照。
+    \item \textbf{Debug信息查看}：提供相机参数，帧数统计，性能分析等信息的实时显示，显示每个 Pass 的耗时，以及渲染管线拓扑图的的导出。
 \end{itemize}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.8\textwidth]{chapter3/rendering_control_usecase.png}
+    \includegraphics[width=0.4\textwidth]{chapter3/rendering_control_usecase.png}
     \caption{渲染控制与参数配置用例图}
     \label{fig:pipeline_usecase}
 \end{figure}
 
-\subsubsection{调试与可视化监控模块}
-系统需提供透明的内部状态反馈，便于用户进行算法验证与性能瓶颈分析：
+\subsubsection{场景交互与观察模块}
+该模块为用户提供灵活的场景巡检手段与实时的系统状态反馈：
 \begin{itemize}
-    \item \textbf{中间附件预览}：用户可以切换显示模式（Display Mode），查看 G-Buffer 分量（法线、深度、运动矢量）以及光追原始信号或降噪后的方差图。
-    \item \textbf{性能统计分析}：用户可以实时监控 CPU 帧时间、FPS 波动，并查看由渲染图自动统计的 GPU 各 Pass 纳秒级耗时明细。
+    \item \textbf{复合相机交互}：系统实现了一套基于弧球（Arcball）逻辑的编辑器相机。用户可通过“键盘+鼠标”的组合键模式进行操作：按住 Alt 键配合鼠标左键实现视角的环绕旋转，配合中键实现焦点的平移，配合右键或滚轮实现焦距缩放。该模式确保了用户能以任意角度观察场景细节。
+    \item \textbf{交互状态反馈}：Debug UI 面板实时同步并显示相机的物理参数，包括相机的世界坐标（Position）、观察焦点（Focal Point）以及视场角（FOV），方便用户在调试特定渲染效果时精确记录机位。
+    \item \textbf{系统性能监测}：集成实时的性能分析器，显示当前帧耗时（Frame Time）与帧率（FPS）波动。通过内置的时间戳查询技术，系统能够将渲染管线的内部执行细节可视化，允许用户监控每个渲染 Pass 的 GPU 执行开销及占比。
 \end{itemize}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.8\textwidth]{chapter3/visualization_debug_usecase.png}
-    \caption{可视化监控用例图}
+    \includegraphics[width=0.4\textwidth]{chapter3/visualization_debug_usecase.png}
+    \caption{场景交互与观察用例图}
     \label{fig:debug_usecase}
 \end{figure}
 
@@ -97,61 +96,64 @@ Chimera 混合渲染系统在设计时以图形开发者和环境艺术家为核
 \subsection{性能与响应时间}
 实时渲染系统对计算效率有着严苛的要求，需确保算法逻辑与数据流转的高度优化：
 \begin{itemize}
-    \item \textbf{交互实时性指标}：在目标硬件平台上，系统需维持稳定的高帧率输出。单帧渲染的端到端延迟应满足交互式三维应用的标准（如 60 FPS 对应的 16.6ms），以确保场景漫游与参数调节时的平滑响应。
-    \item \textbf{算法复杂度控制}：系统需针对计算密集型任务（如射线求交、信号降噪）进行时间与空间复杂度的深度优化。应利用并行计算加速技术（如 Compute Shader 分块计算）规避性能瓶颈，确保系统性能不随场景复杂度的增长而出现非线性骤降。
+    \item \textbf{交互实时性指标}：在目标硬件平台上，系统应能维持稳定的亚秒级反馈。单帧渲染的端到端延迟应满足实时渲染的工业标准，确保在复杂场景漫游与参数调节时具有平滑的交互响应。
+    \item \textbf{算法复杂度控制}：系统需针对计算密集型任务（如时空信号降噪）进行时间与空间复杂度的深度优化。利用并行计算等技术规避性能瓶颈，确保系统性能不随场景复杂度的增长而出现非线性骤降。
 \end{itemize}
 
 \subsection{安全性与稳定性}
 在底层图形 API 驱动下，渲染系统必须构建坚实的资源保护与执行同步机制：
 \begin{itemize}
-    \item \textbf{底层资源安全}：系统需实现严谨的显存生命周期管理，通过延迟销毁等机制确保 GPU 正在引用的缓冲区或图像资源不会被非法释放，从架构层面预防驱动层面的访问冲突或显存泄露。
-    \item \textbf{执行同步健壮性}：系统需能够精确管理异步执行流水线中的资源依赖（如写后读冒险），通过自动化的同步引擎生成最优的同步屏障，杜绝由于执行竞态导致的画面闪烁或硬件超时重置。
+    \item \textbf{底层资源安全}：系统需实现一套基于引用计数与延迟销毁的显存管理机制。通过 RenderGraph 的资源生存区间分析，确保 GPU 正在引用的缓冲区或图像资源不会被非法释放，从架构层面预防驱动层面的访问冲突。
+    \item \textbf{执行同步健壮性}：系统需要规范管理异步流水线中的资源依赖。通过自动化同步引擎推导并生成最优的同步屏障，避免由于读写竞态导致的画面闪烁或硬件超时重置。
 \end{itemize}
 
 \subsection{可用性与可靠性}
 系统应具备在复杂运行环境下保持稳定输出的能力，并提供有效的容错逻辑：
 \begin{itemize}
-    \item \textbf{状态切换可靠性}：在动态调整渲染路径或配置参数时，系统需具备健壮的状态机管理能力，确保在模式剧烈切换过程中不发生崩溃，并能恢复至合法的工作状态。
-    \item \textbf{异常捕获与反馈}：系统应具备环境感知能力，当运行环境无法满足核心需求（如硬件功能缺失或着色器资源异常）时，能够优雅地捕获错误并提供详细的诊断信息提示，引导用户进行故障排除。
+    \item \textbf{状态切换可靠性}：在动态切换渲染路径（如从光栅化切至光线追踪）或调整配置参数时，系统需具备健壮的状态机管理能力，确保管线重建过程中的显存状态转换合法，不发生崩溃。
+    \item \textbf{异常监控与诊断}：系统需要有良好的监测系统，能够实时捕获硬件特性缺失（如不支持 RT 扩展）或着色器编译异常，并向开发者提供详细的底层诊断信息。
 \end{itemize}
 
 \subsection{易用性}
 系统界面设计与交互逻辑应符合图形行业规范，降低操作者的认知负担：
 \begin{itemize}
-    \item \textbf{交互直觉性}：参数调节面板与场景管理接口的设计应遵循数字内容创作工具的通用逻辑。常用渲染因子（如光照强度、后处理参数）应提供直观的可视化调节手段，实现“所见即所得”的操作体验。
+    \item \textbf{交互直觉性}：参数调节面板与场景管理接口的设计应遵循数字内容创作工具的通用逻辑。常用渲染配置应提供直观的可视化调节手段，实现“所见即所得”的操作体验。
     \item \textbf{辅助支持能力}：系统需配备完善的实时日志监测与诊断工具，并提供符合行业标准的摄像机控制系统，确保用户能够低成本、高效率地进行场景观察与算法验证。
 \end{itemize}
 
 \subsection{可维护性与可扩展性}
 渲染系统的架构设计应支持长期的功能迭代与模块替换：
 \begin{itemize}
-    \item \textbf{高度模块化解耦}：系统需采用逻辑层与驱动层分离的架构。通过高度抽象的调度中枢（如渲染图架构），使得新的渲染算法节点能够以插件化的方式接入，而无需对核心同步框架进行破坏性修改。
-    \item \textbf{架构透明度}：系统需维持清晰的代码结构与详尽的技术文档注释，确保其内部的数据流向与组件协作关系易于理解，从而降低二次开发与性能调优过程中的维护成本。
+    \item \textbf{高度模块化解耦}：系统需采用逻辑层与驱动层分离的架构。通过高度抽象的调度中枢，使得新的渲染算法节点能够以插件化的方式接入，而无需对核心同步框架进行破坏性修改。
+    \item \textbf{架构透明度}：系统需维持清晰的代码结构，确保其内部的数据流向与组件协作关系易于理解，从而降低二次开发与性能调优过程中的维护成本。
 \end{itemize}
 
 \section{系统核心类设计}
 本节通过一系列类图展示系统的静态设计结构，涵盖从全局框架到具体渲染调度的协作关系。系统采用高度模块化的 C++ 设计，其核心类协作主要分布在框架管理、资源调度、场景组织及渲染执行四个主要维度。
 
 \subsection{全局管理与框架类设计}
-系统以 \texttt{Application} 为单例核心，通过聚合 \texttt{Window} 和 \texttt{VulkanContext} 确立运行环境。分层框架通过 \texttt{LayerStack} 管理各具职责的功能层（Layer），并集成事件分发机制。
+系统以 \texttt{Application} 为单例核心，通过组合模式聚合 \texttt{Window} 和 \texttt{VulkanContext} 确立运行环境。分层框架利用 \texttt{std::vector<std::shared\_ptr<Layer>>} 构建逻辑栈，支持 \texttt{EditorLayer} 等功能层级的一致性分发。其中 \texttt{VulkanContext} 对 \texttt{VulkanInstance} 与 \texttt{VulkanDevice} 进行了深度封装，为全系统提供统一的硬件能力抽象。
+
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.8\textwidth]{chapter3/framework_class_diagram.png}
+    \includegraphics[width=0.4\textwidth]{chapter3/framework_class_diagram.png}
     \caption{全局管理与分层框架类图}
     \label{fig:framework_class_diagram}
 \end{figure}
 
 \subsection{资源管理与场景组织类设计}
-\texttt{ResourceManager} 负责 Vulkan 底层资源的 RAII 封装与延迟销毁调度。场景系统通过 \texttt{Scene} 类组织 \texttt{Entity} 及其关联的 \texttt{Mesh} 组件，并与硬件加速结构（AS）进行同步。
+系统采用组件化（Component-based）的场景组织结构。 \texttt{ResourceManager} 负责 Vulkan 资源的 RAII 封装，通过基于线程池（Thread Pool）的多线程后台处理流水线，实现资产加载与逻辑更新的并行化，确保了大规模场景导入时的系统响应效率。 \texttt{Scene} 类通过 \texttt{Entity} 容器组织场景对象，每个实体由 \texttt{TransformComponent}（TRS 变换）与 \texttt{MeshComponent}（模型引用）构成。系统通过对这些组件的实时追踪，自动维护并同步硬件加速结构（AS）。
+
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.8\textwidth]{chapter3/resource_scene_class_diagram.png}
+    \includegraphics[width=0.4\textwidth]{chapter3/resource_scene_class_diagram.png}
     \caption{资源管理与场景组织类图}
     \label{fig:resource_scene_class_diagram}
 \end{figure}
 
 \subsection{渲染调度引擎核心类设计}
-渲染调度由 \texttt{RenderGraph} 引擎驱动，通过 \texttt{PassBuilder} 实现渲染通道（Pass）的声明式构建与依赖分析。
+渲染调度由声明式的 \texttt{RenderGraph} 引擎驱动。系统通过 \texttt{PassBuilder} 捕获各渲染通道对显存资源的读写（Read/Write）依赖，从而推导出资源的物理生存区间。在执行阶段，引擎为不同类型的通道分发对应的执行上下文（\texttt{ExecutionContext}），屏蔽了底层同步屏障与镜像布局转换的复杂性，实现了高层次的架构解耦。
+
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.8\textwidth]{chapter3/rendergraph_engine_class_diagram.png}
@@ -160,4 +162,4 @@ Chimera 混合渲染系统在设计时以图形开发者和环境艺术家为核
 \end{figure}
 
 \section{本章小结}
-本章通过对可行性、业务流程及功能模块的深度拆解，明确了 Chimera 引擎的技术基准与交互标准，为下一章的概要设计提供了逻辑依据。
+本章通过对可行性、业务流程及功能模块的深度拆解，明确了 本渲染引擎 混合渲染引擎的技术基准与交互标准。通过用例分析确立了用户在场景管理与管线调优中的核心需求，并通过详细的类图设计勾勒出了系统各子模块间的协作逻辑。本章的研究成果为下一章进入概要架构设计提供了明确的功能指导与工程依据。

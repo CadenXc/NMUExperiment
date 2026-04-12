@@ -3,36 +3,37 @@
 \chapter{概要设计}
 \label{chap:general_design}
 
-本章将对 Chimera 渲染引擎进行宏观架构设计。首先从渲染器在图形系统中的角色出发，确立系统的设计目标，随后详细阐述本项目采用的五层分层拓扑架构、核心模块划分以及 GPU 侧的资源组织方案。
+本章将对渲染引擎进行宏观架构设计。首先从渲染器在图形系统中的角色出发，确立系统的设计目标，随后详细阐述本项目采用的五层分层拓扑架构、核心模块划分以及 GPU 侧的资源组织方案。
 
 \section{渲染器设计概述}
-渲染器（Renderer）是实时图形系统的核心子系统，负责将抽象的场景数据（顶点、材质、光照等）翻译为 GPU 可执行的底层操作，并最终生成图像。Chimera 引擎的设计目标是构建一个具备现代工业级特性的混合渲染平台。在底层架构上，它追求与现代商业引擎相似的高内聚、低耦合特性，具备模型异步加载、资源自动管理及事件高效响应等基础能力，为上层复杂的混合渲染算法提供稳定的调度底座。
+渲染器是游戏引擎中最核心的子系统之一，它负责图形绘制，接收渲染命令和资源数据（顶点、纹理、Shader 等），并调用 OpenGL/D3D/Vulkan 等图形API，将游戏世界中的数据（模型、纹理、光照、摄像机等）转换为最终呈现在屏幕上的图像。
+渲染引擎的设计目标是构建一个具备现代工业级特性的混合渲染平台。在底层架构上，它追求与现代商业引擎相似的高内聚、低耦合特性，具备模型异步加载、资源自动管理及事件高效响应等基础能力，为上层复杂的混合渲染算法提供稳定的调度底座。
 
 \section{系统整体架构设计}
 
 \subsection{架构总体思路}
 在系统搭建上，本项目参考了 Walnut 引擎的简洁设计理念，并在此基础上实现了基于 RenderGraph 的数据驱动架构。为了实现开发环境与引擎逻辑的物理隔离，系统采用“引擎核心 + 沙盒应用”的分离模式：
 \begin{itemize}
-    \item \textbf{引擎核心 (Engine Core)}：编译为静态库，封装了 Vulkan API 抽象、任务调度及渲染路径管理，屏蔽底层复杂性。
-    \item \textbf{沙盒应用 (Sandbox)}：作为独立的可执行项目，通过调用核心库接口编写具体的渲染逻辑，开发者无需感知底层的同步与显存分配细节。
+    \item \textbf{引擎核心 (Engine Core)}：编译为静态库，封装了 Vulkan API 抽象、任务调度及渲染路径管理，屏蔽底层复杂性，是渲染引擎的核心内容。
+    \item \textbf{沙盒应用 (Sandbox)}：作为独立的可执行项目，通过调用核心库接口编写具体的渲染逻辑，开发者无需了解底层的同步与显存分配细节。
 \end{itemize}
 
 \subsection{五层分层拓扑架构}
-为了提高系统的可扩展性，本项目采用了清晰的分层拓扑架构。整个引擎从顶层应用到底层硬件划分为五个逻辑层，如图 \ref{fig:renderer_architecture} 所示。
+依据现在游戏引擎的基本架构和对参考引擎 Walnut 的分析，本项目采用了如下分层拓扑架构。整个引擎从顶层应用到底层硬件划分为五个逻辑层，如图 \ref{fig:renderer_architecture} 所示。
 
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.9\textwidth]{chapter3/renderer_architecture.png}
-    \caption{Chimera 引擎五层分层拓扑架构图}
+    \caption{引擎五层分层拓扑架构图}
     \label{fig:renderer_architecture}
 \end{figure}
 
 \begin{enumerate}
     \item \textbf{应用层 (Sandbox Layer)}：具体的沙盒应用入口。开发者通过继承 \texttt{Application} 基类并挂载自定义逻辑层，实现不同渲染场景的快速构建。
-    \item \textbf{核心框架层 (Core Layer)}：负责引擎的“行政管理”。包含支持插件式管理的 \texttt{LayerStack}、采用拦截机制的事件系统以及高层级的生命周期控制。
-    \item \textbf{场景与资源层 (Scene \& Assets Layer)}：负责数据的“空间组织”。管理加速结构（AS）的实时更新、资源并行处理任务以及资源的中心化调度。
-    \item \textbf{渲染调度层 (Renderer Layer)}：系统的“大脑”。以 \texttt{RenderGraph} 为中枢，负责 DAG 构建、显存别名优化及指令录制。
-    \item \textbf{平台硬件层 (Platform Layer)}：直接与硬件对话。利用 \texttt{volk} 动态加载 Vulkan API，负责交换链管理、窗口事件捕获及驱动级验证层配置。
+    \item \textbf{核心框架层 (Core Layer)}：负责引擎的调度。包含支持插件式管理的 \texttt{LayerStack}、采用拦截机制的事件系统以及高层级的生命周期控制。
+    \item \textbf{场景与资源层 (Scene \& Assets Layer)}：负责资源和场景的管理。管理加速结构（AS）的实时更新、资源并行处理任务以及资源的中心化调度。
+    \item \textbf{渲染调度层 (Renderer Layer)}：负责对渲染管线，Pass等进行调度。以 \texttt{RenderGraph} 为中枢，负责 DAG 构建、显存别名优化及指令录制。
+    \item \textbf{平台硬件层 (Platform Layer)}：引擎的硬件抽象层。利用 \texttt{volk} 动态加载 Vulkan API，负责交换链管理、窗口事件捕获及驱动级验证层配置。
 \end{enumerate}
 
 \section{核心功能模块划分}
@@ -47,11 +48,16 @@
 \subsection{场景管理与交互控制模块}
 采用实体-组件模型组织场景，实现基于 AABB 的视锥体剔除与静态八叉树空间划分。该模块通过 \texttt{Scene} 类统一管理 TLAS 实例，并内置 \texttt{EditorCamera} 实现弧球交互。交互系统利用输入轮询机制封装底层窗口状态，保障了复杂场景观察时的响应实时性。
 
-\subsection{渲染调度引擎 (RenderGraph) 模块}
-作为调度中枢，该模块负责构建渲染任务的有向无环图（DAG）。它通过声明式接口自动推导资源依赖，执行拓扑排序并自动插入管线屏障。该模块的设计目标是实现渲染逻辑与底层同步细节的深度解耦，支持并行层级（Parallel Leveling）的指令录制。
+\subsection{渲染调度引擎模块}
+作为系统的调度中枢，该模块负责构建渲染任务的有向无环图（DAG）。其核心设计遵循“声明式渲染”原则，将渲染逻辑与底层驱动细节深度解耦：
+\begin{itemize}
+    \item \textbf{虚拟资源映射机制}：开发者在注册阶段仅需使用逻辑 Handle 描述资源（如纹理、缓冲区）的读写意图，而不必感知具体的显存分配。系统在 Compile 阶段统一进行物理资源的绑定与别名优化。
+    \item \textbf{拓扑分析设计}：通过对 Pass 节点进行拓扑排序，系统能够自动确立任务的执行序列，并基于资源生存区间分析（Liveness Analysis）实现显存的跨 Pass 复用。
+    \item \textbf{屏障自动推导}：该模块通过追踪资源的 Layout 状态，自动在相邻 Pass 间插入最优的流水线屏障，彻底解决了手动管理同步导致的数据竞态问题。
+\end{itemize}
 
 \subsection{混合渲染管线模块}
-实现“光栅化引导光线追踪”的混合管线流程。该模块整合了 G-Buffer 采集、硬件加速的光追查询（阴影、AO、反射及间接光）以及时空一致性重建算法。作为渲染路径的具体实现，它负责将复杂的算法 Pass 注入到 RenderGraph 调度引擎中执行。
+实现“光栅化引导光线追踪”的混合管线流程。该模块整合了 G-Buffer 采集、硬件加速的光追查询（阴影、AO、反射及间接光）以及 SVGF 降噪算法。作为渲染路径的具体实现，它负责将复杂的算法 Pass 注入到 RenderGraph 调度引擎中执行，确立了“前级生产、后级消费”的数据依赖链条。
 
 \subsection{可视化与交互调试模块}
 基于 ImGui 实现全透明的实时监控界面。该模块提供渲染中间附件（如法线、方差图）的实时预览功能，并集成 GPU 性能戳统计分析工具，支持用户在运行时动态调节渲染参数以达到最佳画质平衡。
@@ -61,25 +67,25 @@
 \begin{itemize}
     \item \textbf{全局材质属性表}：利用无绑定（Bindless）技术，将所有 PBR 参数（如颜色、粗糙度、贴图索引）线性化存储于全局 SSBO 中。着色器通过材质 ID 即可实现 $O(1)$ 复杂度的随机访问，彻底规避了传统描述符集频繁切换的开销。
     \item \textbf{资源元数据追踪表}：在 RenderGraph 内部维护一张资源状态表，记录每个纹理的格式、分辨率、生存区间及当前 Image Layout。这是实现自动化流水线同步与显存别名（Aliasing）复用的核心数据依据。
-    \item \textbf{硬件加速结构索引}：管理 TLAS 实例句柄与各 Mesh 对应的 BLAS 内存地址。该结构确立了几何数据在光线追踪求交计算中的空间映射关系，支持动态场景下的实时更新。
+    \item \textbf{加速结构索引体系}：管理 TLAS 实例句柄与各 Mesh 对应的 BLAS 内存地址。该结构确立了几何数据在光线追踪求交计算中的空间映射关系，支持动态场景下的实时更新。
 \end{itemize}
 
 \section{渲染数据流图 (DFD)}
-系统的渲染流程体现了从“ CPU 资产描述”到“ GPU 像素呈现”的高度自动化转换，其顶层数据流转如图 \ref{fig:render_dfd} 所示。
+系统的渲染流程体现了从“CPU 资产描述”到“GPU 像素呈现”的高度自动化转换。其顶层数据流转逻辑体现了资产、逻辑与硬件指令的协同，如图 \ref{fig:render_dfd} 所示。
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.4\textwidth]{chapter3/render_dfd.png}
+    \includegraphics[width=0.4\textwidth]{figures/chapter4/render\_dfd\_refined.png}
     \caption{系统渲染数据流图 (DFD)}
     \label{fig:render_dfd}
 \end{figure}
 
 整个流转过程可分为三个核心阶段：
 \begin{enumerate}
-    \item \textbf{资产预处理流}：由多线程 TaskSystem 驱动，将磁盘中的 GLTF 模型与贴图转化为物理 Buffer 与 Image，并同步构建硬件加速结构。
-    \item \textbf{逻辑调度流}：RenderGraph 模块接收渲染路径配置，通过对 Pass 节点进行拓扑排序，确立资源在各阶段的读写顺序。
-    \item \textbf{硬件指令流}：调度中枢将虚拟节点转化为具体的 Vulkan 指令，并根据元数据自动插入同步屏障，最终驱动 GPU 完成混合计算并输出至交换链。
+    \item \textbf{资产预处理流 (CPU / TaskSystem)}：由多线程任务系统驱动，并行执行 GLTF 模型解析与贴图解码。随后在 GPU 侧分配物理显存并上传数据，同步完成底层（BLAS）与顶层（TLAS）加速结构的构建，为光追逻辑准备空间上下文。
+    \item \textbf{逻辑调度流 (RenderGraph Engine)}：调度中枢接收渲染路径的声明式配置，注册虚拟 Pass 节点及其资源依赖。通过拓扑排序确立执行序列，并基于生存区间分析实现显存别名（Aliasing）优化与同步屏障（Barriers）的自动化插入。
+    \item \textbf{硬件指令流 (GPU Pipeline)}：引擎将逻辑节点转化为实际的 Vulkan 指令流。GPU 依次执行光栅化 G-Buffer 采集、硬件加速射线查询以及基于 SVGF/TAA 的画质重建算法，最终将混合渲染结果提交至交换链进行呈现。
 \end{enumerate}
 
 \section{本章小结}
-本章完成了 Chimera 引擎的宏观架构设计。通过五层分层拓扑架构确立了系统的解耦原则，并详细定义了六大核心功能模块的逻辑职责。显存逻辑与渲染数据流图的定义为后续详细设计中的具体算法实现提供了坚实的基础。
+本章完成了引擎的宏观架构设计。通过五层分层拓扑架构确立了系统的解耦原则，并详细定义了六大核心功能模块的逻辑职责。显存逻辑与渲染数据流图的定义为后续详细设计中的具体算法实现提供了坚实的基础。

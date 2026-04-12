@@ -3,7 +3,7 @@
 \chapter{系统实现与测试}
 \label{chap:implementation}
 
-本章将展示 Chimera 混合渲染引擎的最终编码实现成果，并按照软件工程标准的测试流程，通过设计严谨的测试用例对系统的功能完整性、稳定性与运行性能进行定量与定性评估。
+本章将展示渲染引擎的最终编码实现成果，并按照软件工程标准的测试流程，通过设计严谨的测试用例对系统的功能完整性、稳定性与运行性能进行定量与定性评估。
 
 \section{系统开发与运行环境}
 系统的开发、构建与压力测试环境配置如表 \ref{tab:environment} 所示。
@@ -20,7 +20,7 @@
 图形处理器 (GPU) & NVIDIA GeForce RTX 5070 Ti Laptop GPU (12GB VRAM) \\ \hline
 开发 API / SDK & Vulkan SDK 1.3.239 / Blackwell RT Core Support \\ \hline
 构建系统 / 编译器 & CMake 3.25 / MSVC 14.3 (Visual Studio 2022) \\ \hline
-核心第三方库 & volk, VMA, ImGui, spdlog, cgltf \\ \hline
+核心第三方库 & volk, VMA, ImGui, spdlog, Assimp \\ \hline
 \end{tabular}
 \end{table}
 
@@ -33,29 +33,48 @@
     \item \textbf{Bindless 材质系统}：系统通过全局描述符集管理场景资产。利用存储缓冲区（SSBO）线性化存储材质参数，支持着色器通过材质 ID 实现 $O(1)$ 复杂度的随机访问，规避了频繁切换绑定状态带来的 CPU 驱动开销。
 \end{itemize}
 
-\subsection{混合渲染管线的解耦实现}
-为了验证算法的独立性，本系统在 \texttt{HybridRenderPath} 中实现了阴影与 AO 的物理拆分：
+\subsection{混合渲染管线的通道化压缩实现}
+为了优化 GPU 显存带宽并提升射线查询效率，本系统在 \texttt{HybridRenderPath} 中实现了信号生成的通道化压缩（Packing）方案：
 \begin{itemize}
-    \item \textbf{信号生成解耦}：系统将实时阴影与环境光遮蔽（AO）信号拆分为两个独立的 \texttt{RTShadowPass} 与 \texttt{RTAOPass}。阴影探测采用针对光源的平行射线，而 AO 探测则采用余弦权重的半球随机采样。
-    \item \textbf{独立降噪控制}：系统为生成的阴影与 AO 信号分别配置了独立的 SVGF 降噪实例。这允许针对阴影的锐利边缘采用更精细的空域滤波权重，而为 AO 信号提供更广阔的模糊半径，从而在 1 SPP 采样率下实现了高质量的视觉重建。
+    \item \textbf{多信号合并探测}：系统通过统一的 \texttt{RTShadowPass} 同时执行实时阴影与环境光遮蔽（AO）的探测。利用蓝噪声（Blue Noise）抖动，阴影信号被写入目标纹理的 R 通道，而 AO 信号则被写入 G 通道。
+    \item \textbf{共享加速结构遍历}：这种设计允许在单次光线追踪调用中复用 TLAS 遍历结果，极大地压低了 1 SPP 采样率下的硬件开销。系统为合并后的信号配置了自适应的 SVGF 降噪实例，在重建阶段通过分量提取分别恢复出纯净的阴影与 AO 场。
 \end{itemize}
+
+本系统将资源管理、场景层级、管线参数调节及 GPU 耗时监控高度集成于统一的控制面板（由 \texttt{EditorLayer} 实现），如图 \ref{fig:editor_ui_integrated} 所示。该界面支持在运行时动态切换渲染路径、实时调节降噪步长并预览中间 G-Buffer 附件，极大地提升了混合渲染算法的调试效率。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{chapter6/editor_ui_integrated.png}
+    \caption{交互面板}
+    \label{fig:editor_ui_integrated}
+\end{figure}
 
 \section{系统测试}
 \subsection{功能性测试用例}
-通过在编辑器中执行交互指令，验证系统各项核心功能的正确性。
+本节参考软件工程标准，通过黑盒测试验证系统各项核心功能的正确性。测试过程中的交互反馈均通过图 \ref{fig:editor_ui_integrated} 所示的集成面板进行实时呈现。
 
 \begin{table}[H]
 \centering
-\caption{核心功能测试结果表}
-\label{tab:test_cases}
-\begin{tabular}{|l|l|l|l|}
+\caption{核心功能模块测试表}
+\label{tab:test_cases_detailed}
+\begin{tabular}{|p{2cm}|p{10cm}|}
 \hline
-\textbf{用例编号} & \textbf{测试功能} & \textbf{测试操作与期望结果} & \textbf{结果} \\ \hline
-T-LOAD & 资产异步加载 & 加载 200MB 以上 GLTF 场景，界面无卡顿，模型完整加载 & 通过 \\ \hline
-T-SWAP & 路径平滑切换 & 在 Forward 与 Hybrid 模式间切换，RenderGraph 拓扑正确重构 & 通过 \\ \hline
-T-AO-CTRL & AO 独立控制 & 勾选 Ray Traced AO 按钮，画面即时产生柔和遮蔽效果，不影响阴影 & 通过 \\ \hline
-T-SAFE-DEL & 动态实体移除 & 移除正在渲染的模型实例，利用 Deletion Queue 确保系统不发生越界崩溃 & 通过 \\ \hline
-T-UI-DEBUG & 附件实时预览 & 切换 Display Mode 为 Normal/Variance，正确输出对应的中间视图 & 通过 \\ \hline
+\textbf{测试编号} & T-CORE-01 \\ \hline
+\textbf{测试对象} & 渲染引擎核心交互功能 \\ \hline
+\textbf{测试目的} & 验证资产加载、路径切换、实体移除及调试输出的正确性 \\ \hline
+\textbf{测试条件} & 硬件支持 Ray Tracing 扩展，Vulkan 运行时环境配置正确 \\ \hline
+\end{tabular}
+
+\vspace{0.2cm}
+
+\begin{tabular}{|l|l|p{2.5cm}|p{2.5cm}|p{2.5cm}|l|}
+\hline
+\textbf{编号} & \textbf{测试用例} & \textbf{操作描述} & \textbf{期望结果} & \textbf{实际结果} & \textbf{测试结果} \\ \hline
+T01 & 资产异步加载 & 从 UI 加载 200MB 的 GLTF 场景 & 界面无卡顿，模型完整渲染 & 界面流畅，数据正确上载 & 通过 \\ \hline
+T02 & 渲染路径切换 & 在 Forward 与 Hybrid 间切换 & RenderGraph 拓扑重构，画面更新 & 管线无缝切换，日志无报错 & 通过 \\ \hline
+T03 & AO 独立控制 & 勾选 Ray Traced AO 调节滑块 & 画面即时产生柔和遮蔽感 & AO 信号正确叠加至画质 & 通过 \\ \hline
+T04 & 动态实体移除 & 选中模型并点击 Remove & Deletion Queue 触发，系统不崩溃 & 资源安全释放，渲染正常 & 通过 \\ \hline
+T05 & 调试预览输出 & 切换显示模式至 Normal 分量 & 屏幕输出法线编码颜色视图 & 对应中间附件正确显示 & 通过 \\ \hline
 \end{tabular}
 \end{table}
 
@@ -116,4 +135,4 @@ T-UI-DEBUG & 附件实时预览 & 切换 Display Mode 为 Normal/Variance，正�
 实验结果表明，系统在高性能移动 GPU 环境下表现卓越，远超 60 FPS 的实时性基准，且 RenderGraph 的显存复用策略有效降低了显存峰值。
 
 \section{本章小结}
-本章完成了 Chimera 引擎从开发环境配置、核心功能编码到系统严谨测试的完整闭环。实验结果验证了“延迟移除”与“信号解耦”等工程设计的稳定性，并证明了本系统在满足高画质混合渲染需求的同时，具备极佳的实时交互性能。
+本章完成了本系统从开发环境配置、核心功能编码到系统严谨测试的完整闭环。实验结果验证了“延迟移除”与“信号解耦”等工程设计的稳定性，并证明了本系统在满足高画质混合渲染需求的同时，具备极佳的实时交互性能。

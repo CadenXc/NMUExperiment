@@ -1,122 +1,78 @@
 % !Mode:: "TeX:UTF-8"
 
-\chapter{实时混合渲染理论基础}
+\chapter{实时混合渲染相关理论}
 \label{chap:theory}
 
-本章将阐述构建实时混合渲染引擎所需的理论基石。首先从宏观视角定义渲染器及其核心职责，随后介绍基于物理的渲染（PBR）数学模型，探讨现代 Vulkan API 的显式驱动机制，最后详细解析硬件加速光线追踪的底层原理，为后续章节中渲染图架构与降噪算法的实现奠定理论基础。
+本章将阐述构建实时混合渲染引擎所需的理论基石。首先从宏观视角定义渲染器及其对物理世界的简化模型；随后深入探讨图形光栅化与光线追踪的基本原理；接着论述实时混合渲染管线的“分而治之”策略；最后探讨现代图形 API 的演进及其在渲染引擎架构中的核心作用，为后续章节中引擎的具体实现奠定严密的理论基础。
 
-\section{渲染器概述}
+\section{实时渲染相关基础理论}
 
-\subsection{渲染介绍}
-渲染（Rendering）是三维计算机图形学中利用软件在平面上从三维模型、场景生成二维图像的过程。该过程涉及对几何建模、纹理映射、光照计算等一系列物理或数学模拟的综合处理，旨在将离散的数字描述转化为最终可见的像素阵列。
+\subsection{渲染模型}
+渲染（Rendering）是将离散的数字描述转化为最终可见像素阵列的过程。为了在有限的算力下模拟复杂的物理世界，本项目对渲染模型进行了三层维度的抽象简化：
+\begin{itemize}
+    \item \textbf{相机模型}：将人眼视觉简化为针孔相机（Pinhole Camera），通过投影矩阵建立三维场景与二维成像平面的几何映射。
+    \item \textbf{几何与材质模型}：利用三角形网格表征宏构拓扑，并采用基于微面元理论的材质参数（如粗糙度、金属度）描述物体表面的微观光学特性。
+    \item \textbf{光源模型}：将发光体简化为点光源、方向光或具有解析分布的面积光源（Area Light），旨在平衡计算开销与光影的物理保真度。
+\end{itemize}
 
-\subsection{渲染器定义与职责}
-渲染器（Renderer）是实时图形系统的核心子系统之一。它负责将抽象的虚拟世界数据（如顶点坐标、材质参数、光源属性等）转换为 GPU 可执行的底层图形指令流。在一个完备的图形引擎中，渲染器不仅承担了最终像素的生成任务，还需具备高效的资源组织、状态调度以及对底层 API 调用链的抽象管理能力。
+\subsection{渲染器职责与架构设计哲学}
+渲染器是图形系统的核心中枢，负责高效组织资源并驱动 GPU 指令流。现代高性能渲染器需遵循“显式声明、隐式同步”的设计原则。通过引入渲染图（Render Graph）技术，系统能够将高层算法逻辑与底层资源生命周期解耦，从而在保障执行效率的同时，降低由于显式 API（如 Vulkan）手动同步带来的研发风险。
 
-相比于功能庞杂的完整游戏引擎（包含物理、音频、AI 等子系统），独立的渲染引擎更专注于图形学前沿算法的实现与验证。然而在底层架构层面，高水准的渲染器依然需要遵循现代软件工程的解耦原则，构建包括模型异步加载、内存池化管理及事件响应在内的基础设施支撑。
+\section{图形光栅化原理}
 
-\section{基于物理的渲染（PBR）理论}
+\subsection{光栅化渲染管线流程}
+光栅化（Rasterization）是现代实时图形学的核心算法，其基本思想是将连续的几何图元（通常为三角形）投影并转化为离散的像素阵列。光栅化管线通常分为以下核心阶段：
+\begin{itemize}
+    \item \textbf{几何阶段}：顶点着色器（Vertex Shader）执行模型、观察与投影变换，将三维坐标映射至齐次裁剪空间。随后进行裁剪与背面剔除，确保仅渲染视锥体内的可见图元。
+    \item \textbf{光栅化阶段}：硬件对投影后的三角形进行扫描，确定哪些像素中心被覆盖，并利用重心坐标（Barycentric Coordinates）执行透视校正插值，为后续着色提供深度、法线及材质属性。
+    \item \textbf{像素处理阶段}：片元着色器（Fragment Shader）计算最终色彩。通过深度测试解决遮挡关系，并由混合器完成最终的图像合成。
+\end{itemize}
 
-\subsection{微面元理论与 Cook-Torrance BRDF}
-% 核心点：解释材质表面如何与光交互
-为了模拟真实世界的材质表现，通常采用微面元模型（Microfacet Theory），假设表面由无数微小的镜面组成。微面曲面模型通常由给出微面法线 $n_f$ 关于曲面法线 $n$ 的分布函数来描述，如图 \ref{fig:microfacet_model} 所示。
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.8\textwidth]{figures/chapter2/Microplane_reflection.png}
-    \caption{微面元模型示意图：(a) 微面法线变化越大，表面越粗糙；(b) 光滑表面的微面法线变化相对较小}
-    \label{fig:microfacet_model}
-\end{figure}
-
-其核心的双向反射分布函数（BRDF）采用 Cook-Torrance 模型：
+\subsection{重心坐标插值与透视校正}
+在光栅化过程中，为了在三角形内部恢复顶点的属性（如 UV 坐标、法线），系统采用重心坐标插值。对于三角形内任意一点 $P$，其属性 $\phi_P$ 可表示为三个顶点属性的加权平均：
 \begin{equation}
-    f_r(p, \omega_i, \omega_o) = k_d \frac{c}{\pi} + k_s \frac{D(h)F(v, h)G(l, v, h)}{4(n \cdot l)(n \cdot v)}
+    \phi_P = \alpha \phi_A + \beta \phi_B + \gamma \phi_C
 \end{equation}
-其中，$k_d$ 和 $k_s$ 分别代表漫反射和镜面反射的能量比例，满足能量守恒定律。$D(h)$ 为 Trowbridge-Reitz GGX 分布函数，$F$ 采用 Schlick 近似菲涅尔项，$G$ 则基于 Smith 模型描述表面的几何遮蔽与阴影效应。
+由于投影变换是非线性的，直接在屏幕空间进行线性插值会导致纹理扭曲。现代 GPU 强制执行透视校正插值（Perspective Correct Interpolation），通过对属性除以深度值 $w$ 进行线性插值后再还原，确保了宏观透视关系的正确性。
 
-\subsection{渲染方程与蒙特卡洛积分}
-场景中任意点的出射辐亮度 $L_o$ 由 Kajiya 提出的渲染方程（Rendering Equation）描述：
-\begin{equation}
-    L_o(p, \omega_o) = L_e(p, \omega_o) + \int_{\Omega} f_r(p, \omega_i, \omega_o) L_i(p, \omega_i) (n \cdot \omega_i) d\omega_i
-\end{equation}
-该方程指出，某点的出射光是其自身发光 $L_e$ 与半球范围内入射光 $L_i$ 经过表面反射后的总和。在实时混合渲染中，由于积分项无法解析求得，通常采用蒙特卡洛积分进行离散采样估算：
-\begin{equation}
-    L_o(p, \omega_o) \approx \frac{1}{N} \sum_{i=1}^{N} \frac{f_r(p, \omega_i, \omega_o) L_i(p, \omega_i) (n \cdot \omega_i)}{p(\omega_i)}
-\end{equation}
-其中 $p(\omega_i)$ 是对应的概率密度函数（PDF）。在 1 SPP（每像素一采样）的严苛限制下，这种随机采样会导致严重的噪声，这是后续 SVGF 降噪算法需要解决的核心矛盾。
+\subsection{硬件加速与 Early-Z 优化}
+为了进一步提升性能，现代 GPU 引入了 Early-Z 技术。在执行耗时的片元着色器之前，硬件会预先进行深度测试。如果当前像素已被遮挡，则直接跳过着色计算。这极大缓解了高复杂场景下的过度绘制（Overdraw）问题。在混合渲染中，这一特性常与 G-Buffer 预通行（Z-Prepass）结合使用，以最大化渲染效率。
 
-\section{现代显式图形 API（Vulkan）架构}
+\section{光线追踪原理}
 
-\subsection{显式资源管理与同步机制}
-不同于传统的图形 API（如 OpenGL）采用隐式状态机管理，Vulkan 强制要求开发者对底层硬件行为进行显式驱动：
+\subsection{光线投射与递归追踪}
+光线追踪（Ray Tracing）基于几何光学的可逆性原理。其基本流程是从相机（视点）向成像平面上的每个像素投射射线（Primary Ray），通过计算射线与场景中几何体的最近交点来确定可见性。
+Whitted 风格的递归光线追踪进一步模拟了光影的物理行为：在交点处，根据材质属性递归地发射反射射线、折射射线以及向光源发射阴影射线（Shadow Ray）。这种方法能够天然地处理复杂的镜面反射、透明折射和硬阴影，弥补了光栅化在全局视觉效果上的缺失。
+
+\subsection{光线追踪的计算挑战}
+与光栅化遍历几何体的逻辑相反，光线追踪是“遍历像素”的过程。其核心开销在于高频次的“射线-几何体求交”测试。在包含百万级三角形的场景中，线性求交的复杂度不可接受，因此必须引入高效的空间加速算法。虽然光线追踪在离线渲染（如影视制作）中已应用多年，但其天然的非相干性与庞大的计算量，直到近年来硬件加速技术（RT Core）的出现才真正具备了实时执行的可能性。
+
+\section{实时混合渲染管线}
+
+\subsection{分而治之的渲染策略}
+实时混合渲染（Hybrid Rendering）旨在结合光栅化的极高吞吐量与光线追踪的物理真实感。其核心逻辑在于根据视觉效果的频率特性与计算成本，将渲染方程解构为不同的子项：
 \begin{itemize}
-    \item \textbf{显存生命周期管理}：论述显存堆（Memory Heap）的手动分配流程。通过 \texttt{vkBindBufferMemory} 实现显存地址与资源对象的关联，极大地提高了显存利用率。
-    \item \textbf{屏障与同步}：Vulkan 1.3 的 \texttt{Synchronization2} 机制允许通过 \texttt{VkImageMemoryBarrier2} 显式描述 GPU 上的执行依赖（Stage Mask）与内存访问（Access Mask），有效解决了“写后读（RAW）”等数据竞争问题。
+    \item \textbf{初级可见性}：利用光栅化快速生成 G-Buffer（包含深度、法线、反照率等），这避免了初级射线求交的庞大开销。
+    \item \textbf{次级光影交互}：对于光栅化难以处理的非局部交互（如非线性软阴影、环境遮蔽及屏幕空间外的镜面反射），采用硬件加速的光线追踪进行离散采样。
 \end{itemize}
 
-\subsection{Vulkan 现代特性：动态渲染 (Dynamic Rendering)}
-传统 Vulkan 加速管线的构建需要繁琐的渲染通道（Render Pass）与帧缓冲（Framebuffer）对象，这不仅增加了代码冗余，还限制了渲染图（Render Graph）在动态切换 Pass 时的灵活性。
+\subsection{管线集成与延迟渲染架构}
+混合管线通常建立在延迟渲染（Deferred Rendering）或分块/分簇渲染（Tile/Clustered Rendering）的基础之上。通过 G-Buffer 提供的空间几何上下文，光线追踪发射器（Ray Emitter）可以从像素位置出发，在世界空间内执行非相干的射线查询。最终，光栅化生成的直接照明与光线追踪生成的复杂光影项在合成阶段（Compositing）进行加权聚合，从而在保证实时性的前提下，实现接近路径追踪的效果。
 
-本文全面采用了 Vulkan 1.3 的动态渲染特性（KHR\_dynamic\_rendering）：
+\section{图形 API 与渲染引擎}
+
+\subsection{显式图形 API 的技术特征}
+现代图形 API（如 Vulkan、DirectX 12）标志着从“驱动代劳”向“开发者完全控制”的范式转变。其核心特征在于显式驱动机制：
 \begin{itemize}
-    \item \textbf{架构简化}：通过 \texttt{vkCmdBeginRendering} 替代了复杂的渲染通道对象创建，允许在执行时动态指定颜色、深度附件的视图（ImageView）与格式。
-    \item \textbf{Render Graph 兼容性}：该特性使得渲染图中的每个虚拟节点（Virtual Node）可以更加轻量地映射到物理资源，消除了由于 Render Pass 布局不匹配导致的管线重编译开销。
+    \item \textbf{显式资源生命周期}：开发者直接负责显存的分配、回收及镜像状态切换（Layout Transition），消除了传统驱动程序在后台进行推测性操作产生的隐式开销。
+    \item \textbf{并行指令录制}：支持多线程并行录制命令缓冲（Command Buffer），彻底解决了传统 API 在 CPU 侧的单线程驱动瓶颈，极大提升了指令吞吐量。
+    \item \textbf{精细化同步控制}：利用 Fence、Semaphore 和 Barrier 显式控制 GPU 内部任务的执行顺序与读写依赖（RAW/WAR），确保了光栅化与光追任务切换时的显存一致性。
 \end{itemize}
 
-\section{可编程着色器与 SPIR-V 技术}
-
-\subsection{着色器编译与 SPIR-V 中间表示}
-Vulkan API 并不直接接收 GLSL 或 HLSL 等高级着色语言的源码，而是采用一种名为 \textbf{SPIR-V} 的二进制中间表示（Intermediate Representation）。
+\subsection{渲染引擎的抽象层职责}
+为了平衡开发效率与硬件性能，现代渲染引擎不仅是 API 的封装器，更是复杂系统的调度中枢。其核心职责包括：
 \begin{itemize}
-    \item \textbf{离线编译}：通过 \texttt{glslc} 或 \texttt{dxc} 等编译器将源码预编译为 SPIR-V 字节码。这种设计显著缩短了运行时的管线创建时间，并提高了代码在不同厂商驱动下的健壮性。
-    \item \textbf{指令集特性}：SPIR-V 支持高级指令扩展（如 \texttt{GL\_EXT\_ray\_tracing}），允许着色器直接访问硬件加速结构（AS）并控制射线遍历过程。
-\end{itemize}
-
-\subsection{多类型流水线阶段 (Shader Stages)}
-Chimera 引擎整合了三类核心流水线阶段：
-\begin{itemize}
-    \item \textbf{图形阶段}：包含顶点着色器（Vertex Shader）与片元着色器（Fragment Shader），主要负责 G-Buffer 阶段的几何提取与最终的后期显示合成。
-    \item \textbf{计算阶段}：利用计算着色器（Compute Shader）的高并行特性执行 SVGF 降噪与 TAA 抗锯齿计算。其具备的共享内存（Shared Memory）机制是实现跨步滤波优化（À-Trous）的关键。
-    \item \textbf{光线追踪阶段}：引入了光线生成（RayGen）、缺失（Miss）以及最近交点（Closest Hit）等专用阶段，构成了处理复杂光路传输的逻辑闭环。
-\end{itemize}
-
-\subsection{资源绑定模型与 Bindless 思想}
-Vulkan 的资源绑定通过描述符集（Descriptor Sets）实现。为了支持海量材质的实时访问，系统在理论上遵循了 **Bindless** 设计原则：
-通过将所有纹理句柄放入一个巨大的数组（Descriptor Array），并利用存储缓冲区（SSBO）线性化存储材质参数，着色器能够以 $O(1)$ 的复杂度根据索引随机访问任意资源。这种设计彻底解决了传统渲染中频繁切换绑定状态（Bind State）带来的 CPU 驱动开销。
-
-\section{硬件加速光线追踪原理}
-
-\subsection{层次包围盒（BVH）加速结构}
-% 核心点：AS 的层级结构
-为了实现高效的射线-几何体求交，现代 GPU 引入了双层加速结构（Acceleration Structures），其层级拓扑关系如图 \ref{fig:bvh_structure} 所示。
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.8\textwidth]{figures/chapter2/bvh_structure_tlas_blas.png}
-    \caption{硬件加速的光线追踪双层包围盒（BVH）架构示意图}
-    \label{fig:bvh_structure}
-\end{figure}
-
-\begin{itemize}
-    \item \textbf{底层加速结构（BLAS）}：存储原始顶点数据与索引，负责局部的交点计算。驱动程序会根据几何体的拓扑结构自动构建最优的二叉树。
-    \item \textbf{顶层加速结构（TLAS）}：存储多个 BLAS 的实例引用（Instance）及其对应的 4x4 世界变换矩阵。这种解耦设计使得场景中物体的平移、旋转仅需重构轻量级的 TLAS，而无需改动庞大的顶点数据，从而支持了动态场景的实时渲染。
-\end{itemize}
-
-\subsection{光线追踪管线与光线查询机制}
-Vulkan KHR 扩展提供了两种各具优势的射线探测实现方式：
-\begin{itemize}
-    \item \textbf{RT Pipeline (RTP)}：采用高度异步化的着色器调度模式。通过 \texttt{RayGen}、\texttt{Miss}、\texttt{ClosestHit} 等专用阶段实现复杂的路径追踪逻辑。该方式适合处理多弹射的全局光照，能够充分利用硬件的调度吞吐量。
-    \item \textbf{Ray Query}：允许在现有的任何着色器阶段（如 \texttt{Compute Shader} 或 \texttt{Fragment Shader}）内以指令形式直接发起射线求交。这种方式具有极高的灵活性和低延迟特征，是本系统中实现硬加速阴影与环境光遮蔽（AO）的首选技术方案。
-\end{itemize}
-
-\section{混合渲染（Hybrid Rendering）逻辑流程}
-
-\subsection{延迟渲染与 G-Buffer 提取}
-混合渲染管线的第一阶段采用光栅化方式生成几何缓冲区（G-Buffer），提取场景的深度（Depth）、法线（Normal）、反照率（Albedo）及材质参数。这种方式减少了后续光线追踪管线的计算量，为后续光线追踪管线的计算提供了必要的信息。
-
-\subsection{基于时空一致性的信号重建理论}
-信号重建的核心目标是在极低采样率（1 SPP）下恢复出无噪声的辐照度场。其理论依据主要包含以下两点：
-\begin{itemize}
-    \item \textbf{时域重投影 (Temporal Reprojection)}：利用物体的运动矢量（Motion Vector）将当前像素映射回上一帧的屏幕坐标，从而实现样本在时间轴上的累积。这在数学上等效于增加了蒙特卡洛积分的样本总数。
-    \item \textbf{方差引导的空间滤波}：由于时域累积在遮挡变化区域会产生失效（Ghosting），系统需实时估算亮度的方差。利用方差作为导向权重，结合联合双边滤波器（Joint Bilateral Filter）在空间域执行保边模糊，从而在抑制噪声的同时保留几何与材质的边缘特征。
+    \item \textbf{Bindless 资源管理}：通过描述符索引（Descriptor Indexing）技术，将海量场景资源（纹理、材质缓冲区）一次性绑定至全局资源池。着色器通过索引实现 $O(1)$ 复杂度的随机访问，彻底消除了传统渲染中频繁切换状态产生的 CPU 开销。
+    \item \textbf{自动化任务调度 (Render Graph)}：渲染引擎通过构建有向无环图（DAG）来描述渲染任务。Render Graph 能够自动推导资源的生命周期、自动插入同步屏障并执行显存别名优化（Aliasing），使开发者能专注于混合渲染算法的逻辑实现。
+    \item \textbf{跨硬件特性适配}：引擎通过特征检测机制，根据硬件能力动态启用光线追踪扩展（如 \texttt{VK\_KHR\_ray\_tracing\_pipeline}）或动态渲染（Dynamic Rendering），确保管线在不同代际 GPU 上的兼容性与稳定性。
 \end{itemize}

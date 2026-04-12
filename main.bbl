@@ -1,4 +1,4 @@
-\begin{thebibliography}{21}
+\begin{thebibliography}{15}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{#1}
 \expandafter\ifx\csname urlstyle\endcsname\relax\else
@@ -11,23 +11,11 @@
   \let\eprint\href
 \fi
 
-\bibitem[Foley et~al.(2013)Foley, van Dam, Feiner, and Hughes]{Foley2013Computer}
-FOLEY J~D, VAN DAM A, FEINER S~K, et~al.
-\newblock Computer graphics: principles and practice\allowbreak[M].
-\newblock 3rd ed.
-\newblock Addison-Wesley Professional, 2013.
-
 \bibitem[Gregory(2018)]{Gregory2018Game}
 GREGORY J.
 \newblock Game engine architecture\allowbreak[M].
 \newblock 3rd ed.
 \newblock CRC Press, 2018.
-
-\bibitem[Shirley et~al.(2009)Shirley and Marschner]{Shirley2009Fundamentals}
-SHIRLEY P, MARSCHNER S.
-\newblock Fundamentals of computer graphics\allowbreak[M].
-\newblock 3rd ed.
-\newblock A K Peters/CRC Press, 2009.
 
 \bibitem[Akenine-M\"{o}ller et~al.(2018)Akenine-M\"{o}ller, Haines, and Hoffman]{AkenineMoller2018RealTime}
 AKENINE-M\"{o}LLER T, HAINES E, HOFFMAN N.
@@ -41,12 +29,6 @@ PHARR M, JAKOB W, HUMPHREYS G.
 \newblock 3rd ed.
 \newblock Morgan Kaufmann, 2016.
 
-\bibitem[Dutr{\'e} et~al.(2006)Dutr{\'e}, Bekaert, and Bala]{Dutre2006Advanced}
-DUTR{\'E} P, BEKAERT P, BALA K.
-\newblock Advanced global illumination\allowbreak[M].
-\newblock 2nd ed.
-\newblock A K Peters/CRC Press, 2006.
-
 \bibitem[Haines et~al.(2019)Haines and Akenine-M\"{o}ller]{Haines2019RayTracingGems}
 HAINES E, AKENINE-M\"{o}LLER T.
 \newblock Ray tracing gems: high-quality and real-time rendering with DXR and other APIs\allowbreak[M].
@@ -56,11 +38,6 @@ HAINES E, AKENINE-M\"{o}LLER T.
 KAJIYA J~T.
 \newblock The rendering equation\allowbreak[J].
 \newblock ACM SIGGRAPH Computer Graphics, 1986, 20\allowbreak (4): 143-150.
-
-\bibitem[Veach(1997)]{Veach1997Robust}
-VEACH E.
-\newblock Robust monte carlo methods for light transport simulation\allowbreak[D].
-\newblock Stanford: Stanford University, 1997.
 
 \bibitem[Burley(2012)]{Burley2012Disney}
 BURLEY B.
@@ -109,11 +86,6 @@ KARIS B.
 Advances in Real-Time Rendering in Games, SIGGRAPH Courses.
 \newblock 2014: 1-2.
 
-\bibitem[Sellers et~al.(2016)Sellers and Kessenich]{Sellers2016Vulkan}
-SELLERS G, KESSENICH J.
-\newblock Vulkan programming guide: the official guide to learning vulkan\allowbreak[M].
-\newblock Addison-Wesley Professional, 2016.
-
 \bibitem[{NVIDIA Corporation}(2024)]{NVIDIA2024Tutorial}
 {NVIDIA Corporation}.
 \newblock Vulkan ray tracing tutorial\allowbreak[EB/OL].
@@ -125,10 +97,5 @@ SELLERS G, KESSENICH J.
 \newblock Vulkan 1.3 specification\allowbreak[M/OL].
 \newblock 2024\allowbreak[2024-03-16].
 \newblock \url{https://registry.khronos.org/vulkan/}.
-
-\bibitem[蔡至诚(2022)]{Cai2022Hybrid}
-蔡至诚.
-\newblock 混合实时渲染关键技术研究\allowbreak[D].
-\newblock 杭州: 浙江大学, 2022.
 
 \end{thebibliography}

@@ -3,7 +3,7 @@
 \chapter{渲染图与渲染管线实现}
 \label{sec:render_graph}
 
-本章将深入探讨 Chimera 引擎的核心调度中枢——渲染图（Render Graph）模块，并详细阐述如何基于该架构构建光栅化、光线追踪以及混合渲染三大核心管线。通过声明式的资源管理与自动化的同步机制，本系统实现了复杂渲染流程的高效调度。
+本章将深入探讨 本渲染引擎 的核心调度中枢——渲染图（Render Graph）模块，并详细阐述如何基于该架构构建光栅化、光线追踪以及混合渲染三大核心管线。通过声明式的资源管理与自动化的同步机制，本系统实现了复杂渲染流程的高效调度。
 
 \section{渲染图（Render Graph）调度系统设计}
 
@@ -23,14 +23,14 @@ Render Graph（亦称 Frame Graph）作为一种现代渲染架构，最早由 Y
 这种设计哲学的核心在于：**显式声明依赖，隐式自动同步**。开发者只需关注“我要做什么”，而系统负责处理“我该怎么做”。
 
 \subsection{架构设计动机：规避“同步地狱”}
-在 Chimera 引擎开发初期，我尝试手动管理 Vulkan 的同步。但随着混合渲染管线的建立，Pass 和Shader数量迅速增加，手动配置每一帧的图像布局转换（Layout Transition）和同步屏障（Barrier）变得极其痛苦且易错。引入 Render Graph 架构的能让系统自动管理，有以下几个好处：
+在本渲染引擎开发初期，我尝试手动管理 Vulkan 的同步。但随着混合渲染管线的建立，Pass 和Shader数量迅速增加，手动配置每一帧的图像布局转换（Layout Transition）和同步屏障（Barrier）变得极其痛苦且易错。引入 Render Graph 架构的能让系统自动管理，有以下几个好处：
 \begin{itemize}
     \item \textbf{自动化同步推导}：系统通过分析 Pass 间的读写关系，自动插入 \texttt{vkCmdPipelineBarrier2}，确保了显存访问的安全性。
     \item \textbf{资源复用与优化}：基于资源的生命周期分析，系统可以自动让不重叠的资源共用同一块显存空间，提高存带宽利用率，防止溢出。
     \item \textbf{快速验证与可视化}：基于 DAG 的底层实现，配合调试面板，开发者可以实时截取任意中间 View 输出，能在开发过程中快速验证每个 Pass 的正确性，确保渲染图的正确。
 \end{itemize}
 
-\subsection{Chimera 引擎的系统实现}
+\subsection{本渲染引擎的系统实现}
 本系统的渲染图模块在工程上被拆分为 \texttt{RenderGraph.h} 与 \texttt{RenderGraphCommon.h}。其核心协作关系采用 **外观模式（Facade）** 与 **策略模式（Strategy）** 相结合的方案，其核心类层次结构如图 \ref{fig:render_graph_class_diagram} 所示。
 
 \begin{figure}[H]
@@ -40,7 +40,7 @@ Render Graph（亦称 Frame Graph）作为一种现代渲染架构，最早由 Y
     \label{fig:render_graph_class_diagram}
 \end{figure}
 
-根据类图分析，Chimera 的具体实现由以下四个核心组件构成：
+根据类图分析，本系统的具体实现由以下四个核心组件构成：
 
 \begin{enumerate}
     \item \textbf{RenderGraph (调度大脑)}：作为系统的中枢，它持有所有的渲染通道栈（\texttt{m\_PassStack}）与物理资源池（\texttt{m\_Resources}）。它驱动了从依赖收集到指令提交的完整生命周期。
@@ -50,7 +50,7 @@ Render Graph（亦称 Frame Graph）作为一种现代渲染架构，最早由 Y
 \end{enumerate}
 
 \subsection{指令录制优化：基于静态多态的智能路由}
-在复杂的混合渲染管线中，频繁地手动实例化不同的执行上下文会产生大量样板代码。为此，Chimera 引擎在 \texttt{RenderGraph} 中实现了一套基于静态多态（Static Polymorphism）的智能分发机制。
+在复杂的混合渲染管线中，频繁地手动实例化不同的执行上下文会产生大量样板代码。为此，本渲染引擎在 \texttt{RenderGraph} 中实现了一套基于静态多态（Static Polymorphism）的智能分发机制。
 
 \subsubsection{特征探测与分发逻辑}
 利用 C++17 的 \texttt{if constexpr} 配合模板元编程中的 SFINAE（替换失败非错）特征检测技术，系统能够在编译期自动探测 Pass 类定义的 \texttt{Execute} 函数签名。分发器的核心逻辑可用下式表达：
@@ -74,7 +74,7 @@ Render Graph（亦称 Frame Graph）作为一种现代渲染架构，最早由 Y
 \end{enumerate}
 
 \subsection{运行生命周期实录：Setup -> Compile -> Execute}
-Chimera 的渲染图每帧会经历三个关键阶段：
+本系统的渲染图每帧会经历三个关键阶段：
 
 \subsubsection{Setup}
 在此阶段，主程序顺序调用各 Pass 的注册逻辑。开发者通过 \texttt{PassBuilder} 建立任务间的依赖关系。此阶段不分配显存，不提交指令，仅仅是在内存中构建出一张“虚拟依赖图”。
@@ -101,7 +101,7 @@ Chimera 的渲染图每帧会经历三个关键阶段：
 \end{figure}
 
 \subsection{工程优势总结}
-通过实现这套复杂的工厂化调度系统，Chimera 引擎获得了以下功能：
+通过实现这套复杂的工厂化调度系统，本渲染引擎获得了以下功能：
 \begin{enumerate}
     \item \textbf{自动同步}：彻底避免了手动管理 Vulkan 同步时易出现的写后读（RAW）冒险导致的画面闪烁。
     \item \textbf{模块化}：新增 Pass 只需声明输入输出，无需改动现有管线的任何同步逻辑。
@@ -110,7 +110,7 @@ Chimera 的渲染图每帧会经历三个关键阶段：
 
 \section{混合渲染管线的拓扑集成与数据流转}
 
-在完成渲染图基础设施的搭建后，本节将重点阐述如何利用该框架集成具体的混合渲染路径（Hybrid Path）。如图 \ref{fig:hybrid_data_flow} 所示，Chimera 引擎的混合渲染管线是一个跨越了图形、光线追踪的复杂有向无环图。
+在完成渲染图基础设施的搭建后，本节将重点阐述如何利用该框架集成具体的混合渲染路径（Hybrid Path）。如图 \ref{fig:hybrid_data_flow} 所示，本渲染引擎 的混合渲染管线是一个跨越了图形、光线追踪的复杂有向无环图。
 
 \subsection{基于光栅化的几何信息采集}
 管线的起点是基于光栅化的几何采集阶段，其核心任务是构建 G-Buffer。
@@ -171,4 +171,4 @@ Chimera 的渲染图每帧会经历三个关键阶段：
 \end{enumerate}
 
 \section{本章小结}
-本章完成了 Chimera 引擎核心调度架构与三大渲染管线的集成实现。Render Graph 的引入提供了现代的管理方式，使得渲染管线的管理流程方便快捷。这使得系统能够在下一章中，专注于解决 锯齿问题，进一步提升图像质量。
+本章完成了 本渲染引擎 核心调度架构与三大渲染管线的集成实现。Render Graph 的引入提供了现代的管理方式，使得渲染管线的管理流程方便快捷。这使得系统能够在下一章中，专注于解决 锯齿问题，进一步提升图像质量。
