@@ -18,9 +18,9 @@
 操作系统 & Windows 11 Pro 64-bit \\ \hline
 处理器 (CPU) & Intel Core i9-13980HX @ 5.6GHz (24 Cores) \\ \hline
 图形处理器 (GPU) & NVIDIA GeForce RTX 5070 Ti Laptop GPU (12GB VRAM) \\ \hline
-开发 API / SDK & Vulkan SDK 1.3.239 / Blackwell RT Core Support \\ \hline
-构建系统 / 编译器 & CMake 3.25 / MSVC 14.3 (Visual Studio 2022) \\ \hline
-核心第三方库 & volk, VMA, ImGui, spdlog, Assimp \\ \hline
+开发 API / SDK & Vulkan SDK 1.3.239 (支持 Ray Tracing 扩展) \\ \hline
+构建系统 / 编译器 & CMake 3.20+ / MSVC 19.34 (Visual Studio 2022) \\ \hline
+核心第三方库 & volk, VMA, ImGui, spdlog, Assimp, cgltf, spirv-reflect \\ \hline
 \end{tabular}
 \end{table}
 
@@ -29,14 +29,14 @@
 \subsection{基于 RAII 与延迟队列的资源管理实现}
 系统通过 \texttt{ResourceManager} 实现了对 Vulkan 句柄的安全封装。
 \begin{itemize}
-    \item \textbf{延迟销毁 (Deletion Queue)}：针对异步移除模型导致的崩溃问题，系统通过 \texttt{std::function} 容器存储销毁回调。每帧结束时更新 \texttt{m\_CurrentFrame}，仅当资源超过 3 帧渲染循环未被引用且 GPU 已彻底执行完相关指令后，才执行物理释放。
+    \item \textbf{延迟销毁 (Deletion Queue)}：针对异步移除模型导致的崩溃问题，系统通过 \texttt{std::function} 容器存储销毁回调。每帧结束时更新 \texttt{m\_CurrentFrame}，仅当资源超过一个完整的双重/三重缓冲周期（由 \texttt{MAX\_FRAMES\_IN\_FLIGHT} 定义，通常为 3 帧）且相关 GPU 指令彻底执行完毕后，系统才在主循环末尾执行物理释放。
     \item \textbf{Bindless 材质系统}：系统通过全局描述符集管理场景资产。利用存储缓冲区（SSBO）线性化存储材质参数，支持着色器通过材质 ID 实现 $O(1)$ 复杂度的随机访问，规避了频繁切换绑定状态带来的 CPU 驱动开销。
 \end{itemize}
 
 \subsection{混合渲染管线的通道化压缩实现}
 为了优化 GPU 显存带宽并提升射线查询效率，本系统在 \texttt{HybridRenderPath} 中实现了信号生成的通道化压缩（Packing）方案：
 \begin{itemize}
-    \item \textbf{多信号合并探测}：系统通过统一的 \texttt{RTShadowPass} 同时执行实时阴影与环境光遮蔽（AO）的探测。利用蓝噪声（Blue Noise）抖动，阴影信号被写入目标纹理的 R 通道，而 AO 信号则被写入 G 通道。
+    \item \textbf{多信号合并探测}：系统通过统一的 \texttt{RTShadowPass} 同时执行实时阴影与环境光遮蔽（AO）的探测。利用由 \texttt{ResourceManager} 预生成的蓝噪声（Blue Noise）执行蒙特卡洛抖动，系统将探测得到的软阴影可见性（Visibility）与环境光遮蔽因子分别写入目标纹理的 R、G 通道。
     \item \textbf{共享加速结构遍历}：这种设计允许在单次光线追踪调用中复用 TLAS 遍历结果，极大地压低了 1 SPP 采样率下的硬件开销。系统为合并后的信号配置了自适应的 SVGF 降噪实例，在重建阶段通过分量提取分别恢复出纯净的阴影与 AO 场。
 \end{itemize}
 
@@ -123,7 +123,7 @@ T05 & 调试预览输出 & 切换显示模式至 Normal 分量 & 屏幕输出法
 \section{性能定量评估与分析}
 
 \subsection{各阶段 GPU 耗时统计}
-利用渲染图内置的硬件时间戳，对 Sponza 场景在 1080P 分辨率下的各渲染阶段进行统计分析：
+利用渲染图内置的 \texttt{TimestampQuery} 硬件时间戳机制（由 \texttt{RenderGraph} 自动插入各 Pass 的指令流起始位置），系统对 Sponza 场景在 1080P 分辨率下的各渲染阶段进行了纳秒级的精确耗时统计：
 \begin{itemize}
     \item \textbf{G-Buffer 采集阶段}：0.68ms (主要受显存带宽限制)；
     \item \textbf{光线追踪探测 (Shadow/AO/Refl)}：3.20ms (RT Core 高效求交并行)；
@@ -132,7 +132,7 @@ T05 & 调试预览输出 & 切换显示模式至 Normal 分量 & 屏幕输出法
     \item \textbf{总帧时间}：约 6.65ms (对应帧率稳定在 150 FPS 以上)。
 \end{itemize}
 
-实验结果表明，系统在高性能移动 GPU 环境下表现卓越，远超 60 FPS 的实时性基准，且 RenderGraph 的显存复用策略有效降低了显存峰值。
+实验结果表明，系统在高性能移动 GPU 环境下表现卓越，远超 60 FPS 的实时性基准，且 \texttt{RenderGraph} 的资源复用策略有效降低了显存峰值。
 
 \section{本章小结}
 本章完成了本系统从开发环境配置、核心功能编码到系统严谨测试的完整闭环。实验结果验证了“延迟移除”与“信号解耦”等工程设计的稳定性，并证明了本系统在满足高画质混合渲染需求的同时，具备极佳的实时交互性能。
