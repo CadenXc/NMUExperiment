@@ -5,591 +5,164 @@
 
 在上一章节，通过对引擎架构的概要设计，确立了五个核心功能模块。本章将针对这些模块，详细阐述其底层的算法逻辑、核心类设计以及数据处理流程。通过对各子系统的深度拆解，将宏观架构具象化为可执行且逻辑严密的工程方案。
 
-\section{平台适配模块}
-本模块直接封装底层硬件接口，负责 Vulkan 运行环境的初始化与硬件抽象。其核心职责在于通过抽象层屏蔽不同显卡驱动的差异，为上层提供稳定的渲染底座。
-
-\subsection{Vulkan 环境初始化与硬件抽象}
-为了屏蔽 Vulkan 初始化过程中的复杂样板代码，引擎构建了一套轻量级的硬件抽象层。
-\begin{itemize}
-    \item \textbf{动态加载机制}：利用 \texttt{volk} 库实现对 Vulkan API 入口的动态加载，绕过了静态链接驱动的局限性，提高了在不同厂商显卡间的运行兼容性。
-    \item \textbf{设备筛选与 RT 扩展探测}：封装了 \texttt{VulkanContext} 单例，负责物理设备筛选。在初始化阶段，系统会枚举物理设备并优先选择支持 \texttt{VK\_KHR\_ray\_tracing\_pipeline} 扩展的独立显卡，从而确保混合渲染算法的硬件基础。
-    \item \textbf{交换链（Swapchain）管理}：实现了鲁棒的交换链重建逻辑。针对窗口缩放产生的表面失效（OutOfDate），系统通过原子标志位通知渲染循环，在下一帧起始处执行资源的物理重置与重建。
-    \item \textbf{验证层与调试机制}：通过集成标准验证层（Validation Layers）并在 \texttt{Debug} 模式下激活调试回调（Debug Callback），系统实现了对 API 非法调用与资源同步竞态的实时监控。
-\end{itemize}
-
-\section{核心框架模块}
-核心框架模块作为整个渲染引擎的“中枢神经”，负责协调各子系统的生命周期、处理底层系统事件以及驱动主渲染循环。该模块的设计核心在于实现逻辑层级的深度解耦与高效的交互响应。
-
-\subsection{Application 生命周期与层级管理}
-\texttt{Application} 类是引擎的单例中枢，通过封装 GLFW 窗口句柄，实现了对应用从初始化、运行到销毁的完整生命周期管控。
-
-\subsubsection{LayerStack 插件式架构设计}
-为了实现 UI 逻辑与核心渲染算法的解耦，系统引入了 \texttt{LayerStack} 容器。它将整个应用逻辑划分为垂直堆叠的“层（Layer）”：
-\begin{itemize}
-    \item \textbf{常规逻辑层 (Layer)}：按推入顺序执行。底层的 \texttt{SceneLayer} 负责场景更新与渲染指令录制，上层逻辑则在其基础上叠加。
-    \item \textbf{置顶覆盖层 (Overlay)}：始终维护在栈顶。通常用于存放 \texttt{ImGuiLayer}，确保交互 UI 始终位于最前端且具有最高的事件响应优先级。
-\end{itemize}
-这种设计允许开发者像插拔组件一样动态添加渲染功能，例如通过推入一个 \texttt{PostProcessingLayer} 即可快速扩展后处理管线，而无需修改主循环代码。
-
-\subsubsection{主循环执行时序 (Main Loop)}
-在 \texttt{Application::Run()} 方法中，引擎通过高频死循环驱动。每一帧的核心执行步骤被严格划分为三个阶段：
-\begin{enumerate}
-    \item \textbf{同步与时间步计算}：计算自上一帧以来的增量时间（Timestep），为相机平滑移动和动态物理模拟提供基准。
-    \item \textbf{层级逻辑分发}：依次遍历 \texttt{LayerStack}，调用各层的 \texttt{OnUpdate} 函数。在此阶段，各层并行或串行地执行业务逻辑并向 \texttt{RenderGraph} 注册渲染任务。
-    \item \textbf{UI 指令收集}：独立调用 \texttt{OnImGuiRender}。由于 ImGui 的指令录制与标准渲染指令在底层 Vulkan 队列中具有不同的同步特征，这种分离设计确保了 UI 渲染不会阻塞核心图形管线的并行。
-\end{enumerate}
-
-\subsection{基于“响应-轮询”双模交互系统}
-为了兼顾“精准决策”与“连续平滑交互”，本引擎设计了一套结合事件回调与状态轮询的交互体系。
-
-\subsubsection{从顶至底的事件拦截机制 (Event Interception)}
-系统通过 \texttt{EventDispatcher} 实现了一套逆序事件流。当操作系统捕获到点击或按键事件时，系统从 \texttt{LayerStack} 的最顶层（通常是 UI 层）开始倒序遍历：
-\begin{itemize}
-    \item \textbf{优先级抢占}：如果用户正在操作调试面板，\texttt{ImGuiLayer} 会首先拦截鼠标点击，并将其标记为“已处理（Handled）”。
-    \item \textbf{拦截逻辑}：分发器检测到 Handle 标志后将立即终止传递。这种机制有效地解决了“点击按钮的同时触发了场景物体选择”的交互冲突痛点。
-\end{itemize}
-
-\subsubsection{硬件抽象层与输入轮询 (Input Polling)}
-针对相机漫游等需要每帧实时反馈的连续操作，依靠离散的事件回调会产生明显的滞后感。系统通过静态类 \texttt{Input} 封装了对 GLFW 状态的底层轮询。在每帧 \texttt{OnUpdate} 的起始处，系统直接查询键盘的物理电平状态。这种“按需查询”的模式配合 \texttt{Timestep} 补偿，确保了在不同帧率下都能获得丝滑、无延迟的运动控制体验。
+\section{平台适配模块详细设计}
+平台适配模块对应五层架构中的“平台层”，主要负责引擎与底层操作系统及图形硬件的通信。在详细设计层面，本模块通过封装全局的 \texttt{VulkanContext} 单例，重点解决了传统 Vulkan 静态链接的性能瓶颈，并实现了面向混合渲染管线的特定硬件特性激活。为清晰展示底层调用逻辑，图 \ref{fig:vulkan_init_sequence} 展现了图形上下文的完整初始化时序图。
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.6\textwidth]{chapter5/app_frame_activity.png}
+    \includegraphics[width=0.85\textwidth]{figures/chapter5/vulkan_init_sequence.png}
+    \caption{Vulkan 图形上下文初始化与硬件特性注入时序图}
+    \label{fig:vulkan_init_sequence}
+\end{figure}
+
+\subsection{基于 volk 的动态函数指针加载机制}
+为了彻底消除 Vulkan 静态链接库带来的平台依赖问题及额外的跳转开销，本模块在架构底层集成了 \texttt{volk} 元加载器。如图 \ref{fig:vulkan_init_sequence} 所示，引擎严格执行两阶段动态加载逻辑：首先绕过静态链接，直接截取 Vulkan 全局核心函数指针；随后在逻辑设备创建完毕后，动态加载特定独立显卡的所有底层函数指针。该设计不仅提升了 API 的执行效率，更是后续挂载非标准核心硬件扩展的先决条件。
+
+\subsection{硬件寻址与特性链 (Feature Chaining) 注入}
+考虑到本引擎的混合渲染管线强依赖于硬件光线追踪扩展。在物理设备寻址阶段，系统除了剔除集成显卡并锁定独立显卡外，还必须通过 \textit{Feature Chaining} 机制安全激活底层算力：
+\begin{enumerate}
+    \item \textbf{设备筛选与扩展探测}：通过遍历系统物理设备，强制校验 \texttt{VK\_KHR\_ray\_tracing\_pipeline} 与 \texttt{VK\_KHR\_acceleration\_structure} 扩展的兼容性，确立混合渲染的硬件基石。
+    \item \textbf{特性链注入逻辑}：利用 Vulkan 独有的 \texttt{pNext} 指针结构，将光追管线特性、加速结构特性以及缓冲区设备地址特性串联组装，并注入逻辑设备创建流中。该设计确保了着色器可以直接通过指针寻址访问底层空间加速结构。
+\end{enumerate}
+
+\subsection{交换链 (Swapchain) 管理与异常恢复}
+在窗口系统交互层面，交换链的色彩空间被严格配置为支持 SRGB 的线性色彩格式。系统优先请求邮箱模式（\textit{Mailbox Mode}）呈现策略，以保证物理真实感与极低的输入延迟。此外，针对窗口缩放引发的表面失效（\texttt{VK\_ERROR\_OUT\_OF\_DATE\_KHR}），系统设计了鲁棒的自动重建逻辑。当监听到窗口尺寸变更时，模块会通过原子标志位通知渲染调度器挂起指令录制，并在帧起始点安全执行资源的物理释放与交换链重建，确保渲染的连续性。
+
+\subsection{验证层与运行时调试机制}
+为解决显式图形 API 极难调试的痛点，平台模块在开发模式下强制激活 \texttt{VK\_LAYER\_KHRONOS\_validation} 标准验证层。系统通过挂载调试回调机制（\textit{Debug Messenger}），实现了对 GPU 端非同步读写竞态、资源泄露以及 API 非法参数的纳秒级监控，为上层复杂管线的开发提供了高可靠的容错保障。
+
+\section{核心框架模块详细设计}
+核心框架模块（Core Layer）是支撑混合渲染引擎高效流转的基础设施层。在原生 Vulkan 环境下，显存的频繁申请与单线程的计算阻塞极易榨干硬件性能。因此，本模块主要处理显存池化管理、异步任务调度以及应用程序生命周期管理。
+
+\subsection{显存池化管理与亚分配（Sub-allocation）策略}
+在 Vulkan 体系中，直接向操作系统申请显存（\texttt{vkAllocateMemory}）受限于硬件最大分配次数，且内核态开销巨大。本模块底层集成了 \texttt{VMA (Vulkan Memory Allocator)} 显存分配框架，旨在从架构层面根治显存碎片化：
+\begin{enumerate}
+    \item \textbf{大块预申请}：系统初始化时，根据物理显卡内存堆（Memory Heap）的属性，向 GPU 预先申请数块大容量内存作为底层缓冲池。
+    \item \textbf{偏移量切分}：引擎内的缓冲区与纹理对象不再直接向驱动请求显存，而是由显存管理器通过亚分配算法，在预申请的堆块内部动态划定偏移量。该设计将显存申请的时间复杂度降至常量级。
+    \item \textbf{持久映射优化}：针对需要 CPU 频繁更新的常量缓冲区（Uniform Buffers），模块开启持久映射（\textit{Persistent Mapping}）机制，规避了每帧反复执行 Map/Unmap 带来的性能损耗。
+\end{enumerate}
+
+\subsection{细粒度异步任务调度系统}
+混合渲染管线涉及海量模型数据的解析与光追加速结构的实时构建。若在主线程同步执行，将导致渲染画面严重卡顿。为此，核心模块设计了一套“生产者-消费者”模式的无锁异步任务调度系统：
+\begin{enumerate}
+    \item \textbf{任务解耦封装}：主渲染线程作为“生产者”，仅负责将模型解析、纹理转码等重度负载封装为独立的任务闭包（Task）并提交至全局调度中枢，自身不参与阻塞计算。
+    \item \textbf{线程池并发消费}：后台常驻的多个工作线程作为“消费者”，并发地从全局队列中提取任务并执行。通过合理的线程数配置，引擎能够充分压榨现代多核 CPU 的并行算力。
+    \item \textbf{状态同步机制}：工作线程完成计算后，通过状态位或信号量通知主线程。主线程在渲染循环中根据同步状态确认资源就绪后，即可将其安全提交至 GPU 管线，确保 \texttt{MAX\_FRAMES\_IN\_FLIGHT} 机制下的执行正确性。
+\end{enumerate}
+
+\subsection{应用程序生命周期与分层架构}
+为了实现渲染逻辑与 UI 交互的解耦，引擎构建了以 \texttt{LayerStack} 为核心的单帧执行生命周期。图 \ref{fig:app_activity} 详细描述了 \texttt{Application} 类在单帧循环内的逻辑流转过程。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.65\textwidth]{figures/chapter5/app_frame_activity.png}
     \caption{Application 单帧执行生命周期活动图}
     \label{fig:app_activity}
 \end{figure}
 
-\section{显存架构与对象生命周期管理}
-为了规避显式 API 带来的繁琐句柄管理并提升显存利用率，系统实现了一套高度抽象的“中心化资源基座”。
-
-\subsection{基于 RAII 的资源抽象与延迟销毁}
-引擎将琐碎的 Vulkan 底层对象封装为高级 C++ 类（如 \texttt{Buffer}、\texttt{Image}），利用 RAII 机制确保资源的确定性释放。
-
-\subsubsection{TaskSystem 线程池调度逻辑}
-系统在初始化阶段会创建一个常驻线程池，其工作线程数量根据宿主机的硬件核心数（Logic Cores）动态分配。通过封装 \texttt{std::future} 与任务队列，系统提供了一个轻量级的非阻塞调度接口。
-\begin{itemize}
-    \item \textbf{工作窃取（Work Stealing）倾向}：利用线程局部队列减少竞争，最大程度压低 CPU 的空转率。
-    \item \textbf{同步原语封装}：利用条件变量（Condition Variable）实现任务的精准唤醒，确保了后台加载任务不会干扰前台渲染的帧率稳定性。
-\end{itemize}
-
-\subsubsection{后台异步资源处理流水线}
-在处理大规模场景（如 Sponza 或复杂 GLTF 模型）时，系统执行四阶段异步流水线：
+如图所示，系统运行遵循以下核心闭环：
 \begin{enumerate}
-    \item \textbf{IO 与元数据解析}：在后台线程调用 \texttt{Assimp} 库读取原始文件。相比于轻量级的解析器，\texttt{Assimp} 能自动处理坐标系转换及切线空间生成。
-    \item \textbf{并行基元转换}：利用线程池将原始顶点重组为 GPU 优化的 \texttt{GpuTriangle} 紧凑结构，该结构专为光线追踪的相交测试进行了 Cache Line 对齐优化。
-    \item \textbf{命令缓冲录制与上传}：在独立的 Transfer 队列中录制物理上传指令（Copy Command），利用 Direct Storage 思想（在支持的硬件上）提升吞吐量。
-    \item \textbf{材质索引集成}：主线程在确认 GPU 传输完成后，执行局部到全局的材质映射，确保模型实例能够正确寻址到全局材质池。
+    \item \textbf{时序与事件驱动}：在每一帧起始阶段，系统首先计算精确的物理时间步进，并轮询操作系统窗口事件。系统采用“消耗制”事件路由，顶层 UI 会优先截断并消费点击事件，防止引发底层场景的误操作。
+    \item \textbf{业务逻辑调度}：在 \texttt{LayerStack} 调度区，系统依次触发所有活动层的更新回调。\texttt{OnUpdate} 专注于场景数据的变换，而 \texttt{OnImGuiRender} 则负责编辑器界面的指令录制，实现了计算逻辑与交互逻辑的物理隔离。
+    \item \textbf{渲染管线闭环}：逻辑更新完成后，系统通过 \texttt{RenderGraph} 自动编排的指令缓冲被提交至硬件队列，并在每一帧末尾通过交换链呈现机制完成光影画面的最终输出，达成毫秒级的低延迟反馈循环。
 \end{enumerate}
+
+\section{资源管理模块详细设计}
+资源管理模块负责大规模资产的生命周期管控与场景组织。其设计重点在于全异步的资产导入流水线以及两级光追加速结构的动态管理。图 \ref{fig:loading_sequence} 绘制了标准化的资产加载与形态转换流转图。
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{chapter5/async_loading_sequence.png}
-    \caption{异步资源加载处理逻辑顺序图}
+    \includegraphics[width=0.85\textwidth]{figures/chapter5/async_loading_sequence_refined.png}
+    \caption{资产解析与光追加速结构流转图}
     \label{fig:loading_sequence}
 \end{figure}
 
-\subsection{基于 RAII 的资源抽象与延迟销毁}
-为了规避 Vulkan 原始句柄带来的管理负担，系统实现了一套高度抽象的“中心化资源调度系统”。
-
-\subsubsection{资源对象 RAII 封装}
-引擎将琐碎的 Vulkan 底层对象（如 \texttt{VkBuffer}, \texttt{VkImage}）封装为高级 C++ 类。利用构造与析构函数自动触发 \texttt{vkDestroy} 指令，从架构层面杜绝了显存泄露。此外，系统严格定义了遵循 \texttt{std430} 标准的结构体（如 \texttt{GpuMaterial}），确保了 CPU 写入与 GPU 读取时的内存布局绝对对齐。
-
-\subsubsection{基于帧序号的延迟销毁队列 (Deletion Queue)}
-由于 GPU 与 CPU 是异步执行的，直接销毁正在被管线引用的资源会导致驱动崩溃。系统引入了延迟销毁机制：当资源被标记为释放时，系统将其推入队列并记录当前帧号。系统会等待一个完整的渲染周期（通常为 3 帧，对应双重或三重缓冲），确保 GPU 彻底执行完相关指令后，才在主循环末尾执行物理清理。该机制保障了场景动态交互（如实时删除模型）时的系统稳定性。
-
-\subsection{VMA 池化管理与 Bindless 架构设计}
-底层显存分配与绑定效率直接决定了混合渲染在复杂场景下的帧率表现。
-
-\subsubsection{基于 VMA 的显存子分配优化}
-频繁调用内核级别的 \texttt{vkAllocateMemory} 会产生严重的碎片化并触发显著的系统开销。系统集成了 \texttt{Vulkan Memory Allocator (VMA)}，通过在大块预分配堆（Heap）上进行亚分配（Sub-allocation），将碎片整理与内存对齐逻辑抽象化，极大地提升了显存申请的成功率。
-
-\subsubsection{基于 Bindless 思想的全局描述符架构}
-为了支持百万级面片与海量纹理的实时渲染，系统弃用了传统的“一物一绑定”模式，采用现代的 **Bindless** 架构：
+\subsection{基于硬件特性的两级加速结构 (AS) 维护}
+针对混合渲染管线中的硬件光线追踪阶段，RT Core 无法直接读取传统的顶点缓冲，必须将其转化为专用的空间包围盒层次结构（BVH）。本模块实现了两级加速结构的动态分离管理：
 \begin{enumerate}
-    \item \textbf{全局描述符池}：利用 \texttt{VK\_DESCRIPTOR\_BINDING\_UPDATE\_AFTER\_BIND\_BIT} 特性，维护一个巨大的纹理数组索引。
-    \item \textbf{材质缓冲区寻址}：将所有材质参数打包进一个全局存储缓冲区（SSBO）。
-\end{enumerate}
-在着色器中，程序不再切换绑定状态，而是通过模型实例数据（Push Constants）传入的索引直接在数组中随机访问资源。这彻底消除了 CPU 端的状态切换开销，实现了“一个 Draw Call 渲染全场景”的极高性能。
-
-
-\section{资源管理模块}
-场景系统定义了虚拟世界的拓扑结构。为了兼顾光栅化管线的提交效率与实时光线追踪的遍历性能，系统实现了“CPU 空间划分 + GPU 硬件加速”的双层架构。
-
-\subsection{场景组织与空间加速算法设计}
-
-\subsubsection{基于组合模式的场景实体结构}
-引擎采用轻量级的组件化设计实现几何与逻辑的解耦：
-\begin{itemize}
-    \item \textbf{Entity (实体)}：场景基本单元，持有全局唯一 ID。
-    \item \textbf{TransformComponent}：维护 4x4 TRS 矩阵，并保存前一帧状态。该组件在渲染流水线中至关重要，它为 TAA 抗锯齿算法提供了关键的像素级运动矢量（Motion Vector）。
-    \item \textbf{MeshComponent}：持有 \texttt{Model} 引用，作为 BVH 构建的原始几何输入。
-\end{itemize}
-
-\subsubsection{视锥体剔除与动态八叉树同步}
-为了降低 CPU 端的指令提交开销，系统在每帧渲染前执行两级可见性判定：
-\begin{enumerate}
-    \item \textbf{基于 AABB 的视锥体剔除}：系统采用 Gribb-Hartmann 算法，直接从当前的 View-Projection 矩阵中实时提取 6 个裁剪平面方程。通过将物体的局部 AABB 变换至世界空间并与平面进行快速求交，直接跳过视野外的物体录制。
-    \item \textbf{动态八叉树 (Octree) 空间索引同步}：当场景实体数量达到量级增长时，系统构建静态八叉树。通过递归子分全场景包围盒，将查询复杂度从 $O(N)$ 降低至近似 $O(\log N)$。为了保障在实体动态移除时的索引一致性，系统实现了“全场景索引校准”策略：在检测到实体被移除后，立即重新计算剩余实体的基元偏移（Primitive Offsets），并彻底销毁旧的树结构后重新构建，确保了复杂场景下频繁交互的稳定性。
+    \item \textbf{底层加速结构 (BLAS) 预构建}：BLAS 负责存储网格的纯粹几何形态。在模型首次加载至显存后，引擎立即调用硬件指令并行计算生成该网格的底层 BVH 树。针对静态物体，采取“偏向快速追踪（Fast Trace）”的构建策略以最大化渲染性能。
+    \item \textbf{顶层加速结构 (TLAS) 动态更新}：TLAS 负责存储整个场景的宏观状态，它通过持有指向多个 BLAS 的引用指针及其在世界空间中的变换矩阵（Transform）来描述场景。由于实体可能在每帧发生位移，本模块在每帧逻辑更新结束后，以极低的开销对 TLAS 进行重建或更新（Update）。这种解耦架构平衡了光追加速结构的构建成本与动态场景的实时性要求。
 \end{enumerate}
 
-\subsubsection{硬件加速的双层 BVH 维护}
-针对实时光线追踪，系统利用 Vulkan KHR 扩展维护双层加速结构：
-\begin{itemize}
-    \item \textbf{底层加速结构 (BLAS)}：存储模型三角形的原始 BVH，由驱动程序在模型加载时一次性构建。
-    \item \textbf{顶层加速结构 (TLAS)}：存储场景实例引用。当物体发生平移或旋转时，系统仅更新 TLAS 变换矩阵，无需重构复杂的顶点数据，从而确保了光追查询的实时响应。
-\end{itemize}
-
-\subsection{EditorCamera 交互算法与坐标变换}
-摄像机系统是用户观察虚拟世界的“眼睛”。在底层图形学实现中，摄像机并不以物理实体形式存在，而是表现为一系列坐标空间变换的数学抽象。
-
-\subsubsection{摄像机原理：操作倒转与观察空间}
-理解摄像机的核心在于“逆变换”逻辑：在虚拟世界中，我们习惯于认为相机在空间中移动，但在渲染流水线中，实际发生的是\textbf{整个场景相对于相机的反向运动}。
-
-例如，当用户指令相机向左移动时，渲染引擎实际上是将场景中所有的物体向右平移。这种将物体从世界空间（World Space）转换到观察空间（View Space）的变换矩阵被称为\textbf{观察矩阵（View Matrix）}。它代表了相机位置与姿态的逆矩阵，决定了观察者如何“看待”这个场景。
-
-\subsubsection{透视投影与裁剪空间}
-为了将观察空间的三维数据映射到二维屏幕上，系统引入了投影矩阵。项目主要采用透视投影（Perspective Projection），其核心参数包括：
-\begin{itemize}
-    \item \textbf{视场角（FOV）}：决定了视野的广度。较大的 FOV 会产生广角效果，增强画面的透视感。
-    \item \textbf{纵横比（Aspect Ratio）}：视口的宽度与高度之比，确保图像在不同尺寸的窗口中不会发生拉伸变形。
-    \item \textbf{近/远裁剪面}：定义了相机可观察的深度范围，超出此范围的几何体将被剔除，以节省计算资源并缓解深度冲突。
-\end{itemize}
-
-\subsubsection{MVP 变换流水线推导}
-一个顶点从模型原始数据到最终屏幕像素，需要经过完整的变换链，其数学表达为：
-\begin{equation}
-    V_{clip} = P \cdot V \cdot M \cdot V_{local}
-\end{equation}
-其中：
-\begin{enumerate}
-    \item \textbf{模型矩阵 ($M$)}：通过平移、旋转、缩放（TRS）将顶点从局部坐标系转换到世界坐标系。
-    \item \textbf{观察矩阵 ($V$)}：将世界坐标系中的物体转换到以相机为原点的观察坐标系。
-    \item \textbf{投影矩阵 ($P$)}：应用透视除法，将坐标转换到归一化设备坐标（NDC）空间。
-\end{enumerate}
-
-\subsubsection{弧球 (Arcball) 相机交互实现}
-系统实现了一套基于弧球（Arcball）逻辑的编辑器相机。与传统的 FPS 相机不同，它始终围绕一个\textbf{焦点（Focal Point）}进行观察，极大地方便了对三维模型的全方位审视：
-\begin{itemize}
-    \item \textbf{轨道旋转 (Orbit)}：通过计算鼠标在屏幕上移动产生的偏航角（Yaw）和俯仰角（Pitch），结合四元数（Quaternion）旋转，实现围绕目标的平滑旋转，且有效规避了万向锁问题。
-    \item \textbf{自适应缩放与平移}：系统根据相机到焦点的距离动态调整移动步长。这种自适应逻辑确保了在观察宏观场景（如 Sponza 整体）时具有较高的移动效率，而在接近模型微观细节时自动降低步长，从而在不同尺度下都能保持一致且细腻的操作手感。
-\end{itemize}
-
-\subsubsection{基于 Reversed-Z 的深度精度优化}
-为了适配 Vulkan 的坐标系规范并缓解大规模场景下的深度冲突（Z-Fighting），系统在投影矩阵中修正了 Y 轴的方向，并应用了 Reversed-Z 技术。通过将近裁剪面映射为 1.0，远裁剪面映射为 0.0，并配合浮点深度缓冲，利用了浮点数在零点附近的更高精度，使整个视锥体内的深度精度分布更加均匀，极大地提升了画面稳定性。
-
-\section{渲染引擎模块}
-渲染引擎模块是系统的逻辑中枢与算法核心。本节将重点阐述数据驱动的 \texttt{RenderGraph} 调度引擎、基于物理（PBR）的光照评估模型以及支撑实时混合渲染的管线执行逻辑。
-
-\subsection{\texttt{RenderGraph} 调度引擎核心原理}
-\texttt{RenderGraph} 是本引擎的调度中枢，它通过构建有向无环图（DAG）实现了渲染逻辑与底层硬件同步的深度解耦。其设计动机在于规避 Vulkan 显式同步机制下的“同步地狱”。
-
-\subsubsection{任务依赖的声明式构建}
-系统采用“编写即配置”的设计逻辑。开发者通过 \texttt{PassBuilder} 接口显式声明每个渲染 Pass 的输入（Read）与输出（Write）资源。在此阶段，系统并不立即执行 GPU 指令，而是在内存中构建出一张“虚拟资源提货单”：
-\begin{itemize}
-    \item \textbf{拓扑排序}：系统利用深度优先搜索（DFS）确立各任务间的严格执行序列，确保生产者始终在消费者之前运行。
-    \item \textbf{自动剔除 (Culling)}：系统会自动分析资源引用链，并剔除未被最终交换链引用的冗余 Pass，从而优化 CPU 端的录制开销。
-\end{itemize}
-
-\subsubsection{资源生存区间与自动化同步推导}
-在执行前，系统会对逻辑任务图进行“编译”，通过分析资源的 \texttt{firstPass} 与 \texttt{lastPass} 精确计算其生存区间（Lifespan）。
-\begin{itemize}
-    \item \textbf{自动化屏障插入}：系统实时对比资源在相邻 Pass 间的状态需求（如从渲染附件布局转换为着色器读取布局），自动推导出最优的 \texttt{vkCmdPipelineBarrier2} 指令。这彻底消除了手动管理“写后读”（RAW）冲突导致的画面闪烁或驱动崩溃风险。
-    \item \textbf{显存别名优化 (Memory Aliasing)}：基于生存区间分析，系统使生命周期互不重叠的临时资源共享同一块物理显存空间。例如，G-Buffer 阶段的中间变量可以与后期处理阶段的临时缓冲区复用，显著降低了高分辨率下的显存占用峰值。
-\end{itemize}
-
-\subsection{基于微面元理论的 PBR 物理光照详细设计}
-项目实现了一套遵循 Disney 原则的基于物理（Physically Based Rendering）评估体系。其数学模型旨在通过对微观几何分布的统计学建模，实现材质在全动态范围（HDR）光照下的物理真实感。
-
-\subsubsection{Cook-Torrance 镜面反射模型推导}
-系统采用 Cook-Torrance BRDF 模型作为光照评估的核心。该模型将镜面反射 lobe 表达为：
-\begin{equation}
-    f_{specular} = \frac{D(h) \cdot F(v, h) \cdot G(l, v, h)}{4(n \cdot l)(n \cdot v)}
-\end{equation}
-
-这种“编写即配置”的设计确保了录制逻辑的高性能，开发者仅需声明所需的上下文类型，系统便会自动处理底层初始化工作（如 \texttt{vkBeginRendering}），且能在编译阶段拦截非法的 API 调用。
-
-\subsection{运行生命周期与自动化调度逻辑}
-渲染图每帧会经历从虚拟描述到物理执行的三个关键阶段，其完整生命周期流程如图 \ref{fig:render_graph_lifecycle} 所示。
+\section{渲染调度模块详细设计}
+渲染调度模块对应引擎的“功能层”，其核心目标是将复杂的混合渲染管线抽象为有向无环图（DAG），从而实现资源生命周期的自动化管理与硬件同步的解耦。图 \ref{fig:render_graph_lifecycle} 详细展示了该模块遵循的“设置-编译-执行”三阶段核心设计。
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.4\textwidth]{chapter5/render_graph_lifecycle_flow.png}
-    \caption{RenderGraph 运行生命周期流程图}
+    \includegraphics[width=0.7\textwidth]{figures/chapter5/render_graph_lifecycle_flow.png}
+    \caption{RenderGraph 调度模块生命周期与任务流转图}
     \label{fig:render_graph_lifecycle}
 \end{figure}
 
-\subsubsection{Setup：虚拟依赖构建}
-在此阶段，主程序顺序调用各 Pass 的注册逻辑。开发者通过 \texttt{PassBuilder} 建立任务间的逻辑依赖关系。此阶段不分配真实显存，不录制 GPU 指令，仅仅是在内存中构建出一张“虚拟提货单”。
-
-\subsubsection{Compile：拓扑分析与显存优化}
-在执行前，RenderGraph 对拓扑结构进行高效编译：
+\subsection{Setup 阶段：虚拟资源与依赖声明}
+在管线构建初期，系统并不直接操作物理资源，而是通过虚拟化层进行声明。开发者在每个渲染任务（Pass）中显式定义输入与输出需求：
 \begin{enumerate}
-    \item \textbf{拓扑排序}：利用 DFS 算法计算出合法的执行序列，确保生产者始终在消费者之前运行，并自动剔除未被引用的冗余 Pass。
-    \item \textbf{资源生存区间分析}：系统计算每个资源的 \texttt{firstPass} 与 \texttt{lastPass}。基于资源的生存区间，系统能够自动分析资源在流水线中的依赖关系，从而实现精准的自动化管线同步与屏障插入。
-    \end{enumerate}
-
-\subsubsection{Execute：自动同步引擎}
-在执行阶段，系统激活“自动同步引擎”。该阶段的自动化同步与指令录制时序如图 \ref{fig:sync_sequence} 所示。
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.85\textwidth]{chapter5/rg_sync_sequence.png}
-    \caption{RenderGraph 自动同步与指令录制顺序图}
-    \label{fig:sync_sequence}
-\end{figure}
-
-系统实时对比资源在相邻 Pass 间的访问需求差异（如从 \texttt{GENERAL} 布局转换至 \texttt{SHADER\_READ\_ONLY}）。若状态不匹配，系统会自动生成最小集合的 \texttt{vkCmdPipelineBarrier2} 指令，彻底解决了手动管理写后读（RAW）冒险导致的画面闪烁问题。此外，系统通过插入 GPU 时间戳查询，实现了对每个渲染阶段纳秒级的性能监控。
-
-\subsection{基于微面元理论的 PBR 物理光照详细设计}
-项目实现了一套高度参数化的基于物理（Physically Based Rendering）评估体系，其数学模型与 SVGF 降噪算法的需求进行了深度对齐，确保了在 1 SPP 采样下的信号稳定性。
-
-\subsubsection{双 Lobe 材质评估模型}
-引擎采用了遵循 Disney 原则的 PBR 架构，将表面材质响应拆分为两个相互独立的 Lobe。总体的渲染方程表达为：
-\begin{equation}
-    f(i, o) = (1 - metallic) \cdot f_{diffuse}(i, o) + f_{specular}(i, o)
-\end{equation}
-其中，漫反射项 $f_{diffuse}$ 采用经典的 Lambertian 模型。对于镜面反射项 $f_{specular}$，系统采用 Cook-Torrance 模型，并通过 Fresnel 项 $F$ 实现漫反射与镜面反射能量保持分配的物理一致性。
-
-\subsubsection{法线分布函数与微面元统计学}
-为了模拟真实物理表面的微观粗糙度，系统引入了统计学评估模型：
-\begin{itemize}
-    \item \textbf{法线分布函数 (D)}：采用 Trowbridge-Reitz GGX。实现中应用了粗糙度的平方重映射（$\alpha = roughness^2$），这使得材质在低粗糙度下具有极其锐利的高光，而在高粗糙度下能呈现出具有物理特征的平滑长尾。
-    \item \textbf{几何遮蔽项 (G)}：采用 Smith 联合遮蔽阴影函数（Heitz 形式）。该函数同时考虑了入射方向与观察方向的相互遮挡，有效地防止了在大角度观察时材质过度变亮的物理错误。
-\end{itemize}
-
-\subsubsection{面向降噪器的材质解耦设计}
-针对混合渲染管线中的信号重建需求，PBR 评估逻辑进行了专门的适配优化。系统实现了反照率解耦（Albedo Demodulation）机制，在着色阶段将高频的纹理信息从辐照度计算中剥离。这种设计确保了 SVGF 降噪器仅作用于低频的光照场信号，避免了纹理细节在滤波过程中被模糊，最终通过重调制（Re-modulation）恢复出绝对锐利的表面细节。
-
-\subsection{混合渲染管线与信号重建算法详细设计}
-混合渲染管线的核心在于利用光栅化的高效性为光线追踪提供精确的上下文。整个执行过程体现了从“确定性几何提取”到“随机性光影计算”的递进，其单帧内的六阶段执行时序如图 \ref{fig:hybrid_sequence} 所示。
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.9\textwidth]{chapter5/hybrid_pipeline_sequence.png}
-    \caption{混合渲染管线单帧执行时序图}
-    \label{fig:hybrid_sequence}
-\end{figure}
-
-根据 RenderGraph 的调度逻辑，管线每帧严格执行以下六个阶段：
-\begin{enumerate}
-    \item \textbf{GBufferPass}：利用光栅化管线快速采集场景的深度、法线、反照率及运动矢量。这些几何附件为后续阶段提供了亚像素级的空间索引。
-    \item \textbf{RT\_Passes}：基于 G-Buffer 提供的世界坐标起始点，向光源及半球空间发射 1 SPP 射线。通过硬件加速结构（TLAS）捕获阴影、环境遮蔽及漫反射间接光等高噪声原始信号。
-    \item \textbf{SVGFPass}：执行降噪核心逻辑。通过时域重投影累积历史信息，并利用多级 À-Trous 跨步滤波器在空间域滤除蒙特卡洛方差噪声。
-    \item \textbf{CompositionPass}：将降噪后的光影信号与反照率进行物理耦合，执行基于 Cook-Torrance 模型的光照合成，生成全动态范围（HDR）的原始着色图像。
-    \item \textbf{TAAPass}：针对几何边缘的采样走样，利用亚像素抖动与时域反馈机制进行抗锯齿处理，进一步提升画面的几何稳定性。
-    \item \textbf{PostProcessPass}：应用后期影像流水线。执行光学抖动还原、ACES 色调映射及伽马校正，最终将电影级视觉产出写入交换链。
+    \item \textbf{虚拟资源句柄}：通过 \texttt{RGResourceHandle} 抽象物理图像与缓冲区。这种延迟绑定的机制允许调度器在编译阶段根据全局依赖关系优化物理显存分配。
+    \item \textbf{显式依赖描述}：利用 \texttt{Read()} 与 \texttt{Write()} 接口声明资源流转。例如，G-Buffer 阶段标记写入法线纹理，而随后的光追阴影阶段标记读取该纹理，系统据此构建任务间的逻辑连接。
 \end{enumerate}
 
-\subsubsection{SVGF 时域累积与矩估计逻辑}
-为了将 1 SPP 的高噪声原始信号转化为平滑的视觉产出，系统实现了 SVGF（Spatiotemporal Variance-Guided Filtering）管线。其第一阶段为时域累积，通过对历史数据的重投影校验，在不增加射线采样数的前提下大幅提升了信号的统计有效性。
-
-\paragraph{1. 鲁棒重投影校验 (Reprojection Validation)}
-系统利用 G-Buffer 中的运动矢量 $\mathbf{v}$ 将当前像素 $\mathbf{p}$ 映射至前一帧位置 $\mathbf{p}'$。为了识别由于遮挡破裂（Disocclusion）引起的“鬼影”现象，系统应用了严格的多因子校验逻辑：
-\begin{itemize}
-    \item \textbf{深度一致性}：采用了基于相对深度差异的判定准则，要求 $|Z_{curr} - Z_{prev}| / (Z_{curr} + \epsilon) < 0.05$。
-    \item \textbf{法线一致性}：通过点积检测表面朝向变化，要求 $\vec{N}_{curr} \cdot \vec{N}_{prev} > 0.95$。
-    \item \textbf{物体 ID 校验}：作为最基础的硬约束，要求当前像素与重投影像素必须属于同一 Mesh 实例。
-\end{itemize}
-
-\paragraph{2. 亮度矩的时域累积与方差预估}
-若校验通过，系统对信号 $\mathbf{C}$ 与亮度矩执行指数移动平均（EMA）累积，历史累积长度上限设为 32 帧：
-\begin{equation}
-    \bar{\mathbf{C}}_t = (1 - \alpha) \bar{\mathbf{C}}_{t-1} + \alpha \mathbf{C}_t, \quad \bar{M}_t = (1 - \alpha) \bar{M}_{t-1} + \alpha M_t
-\end{equation}
-其中 $\alpha = 1 / \text{HistoryLength}$。通过一阶矩 $E[L]$ 与二阶矩 $E[L^2]$ 计算瞬时方差 $\sigma^2 = E[L^2] - (E[L])^2$。若遇到历史失效，系统会利用 $3 \times 3$ 的混合滤波器在空间域对局部方差进行“膨胀”预估（混合局部均值与最大方差），从而为后续的边缘启发式滤波提供鲁棒的引导权重。
-
-\subsubsection{基于 À-Trous 的多级边缘启发式滤波}
-在获得带方差引导的信号后，系统执行 5 遍 À-Trous 空间滤波。
-
-\paragraph{1. 统一边缘停止函数 (Edge-Stopping Functions)}
-对于每个采样样本 $q$，其贡献权重 $w(p, q)$ 由卷积核权重 $h$ 与三个启发式分量共同决定：
-\begin{equation}
-    w(p, q) = h \cdot w_z \cdot w_n \cdot w_l
-\end{equation}
-其中：
-\begin{itemize}
-    \item \textbf{深度权重 $w_z$}：利用深度梯度 $\nabla z$ 抑制跨深度的颜色渗漏。
-    \item \textbf{法线权重 $w_n$}：基于点积的幂函数，保持几何边缘的锐利度。
-    \item \textbf{亮度权重 $w_l$}：基于估计方差 $\sigma$ 动态调整，定义为 $\exp(-\frac{|L_p - L_q|}{\phi \sigma + \epsilon})$。在噪声剧烈区域，$\sigma$ 较大，滤波器会自动增大模糊半径。
-\end{itemize}
-
-\paragraph{2. 方差的空间传播}
-在 À-Trous 迭代中，不仅对颜色进行滤波，对方差也进行同步更新。根据误差传播定律，滤波后的方差计算公式为 $\sigma^2_{filtered} = \sum w_i^2 \sigma_i^2 / (\sum w_i)^2$。这种递归式的方差估计确保了降噪过程在数学上的收敛性。
-
-\subsubsection{光栅化中的离散采样与锯齿现象}
-在光栅化阶段，系统对每个三角形进行覆盖测试。由于像素中心点的分布是离散的，当三角形的边缘斜向穿过像素阵列时，生成的着色像素点会呈现断断续续的阶梯状，这种现象被称为锯齿aggies）。在信号处理中，这种由于采样频率不足导致的失真统称为**走样**。
-
-走样的根本原因在于：信号变化的频率过高（高频信号），而采样的频率过慢，导致采样后的信号发生频谱混叠。为了减少走样，通常遵循“先模糊，再采样”的预滤波（Pre-Filtering）原则。典型的 G-Buffer 各层分量如图 \ref{fig:gbuffer_components} 所示。
-
-\begin{figure}[H]
-    \centering
-    \begin{subfigure}{0.23\textwidth}
-        \includegraphics[width=\textwidth]{chapter5/gbuffer-albedo.png}
-        \caption{Albedo}
-    \end{subfigure}
-    \hfill
-    \begin{subfigure}{0.23\textwidth}
-        \includegraphics[width=\textwidth]{chapter5/gbuffer-normal.png}
-        \caption{Normal}
-    \end{subfigure}
-    \hfill
-    \begin{subfigure}{0.23\textwidth}
-        \includegraphics[width=\textwidth]{chapter5/gbuffer-material.png}
-        \caption{Material}
-    \end{subfigure}
-    \hfill
-    \begin{subfigure}{0.23\textwidth}
-        \includegraphics[width=\textwidth]{chapter5/gbuffer_depth_linear.png}
-        \caption{Depth (Linear)}
-    \end{subfigure}
-    \caption{G-Buffer 多附件几何信号采集分量图}
-    \label{fig:gbuffer_components}
-\end{figure}
-
-通过提取场景的深度（Depth）、法线（Normal）及材质参数，系统为后续的光线追踪管线提供了精确的求交起始点与表面属性依据。
-
-\subsubsection{蒙特卡罗积分与重要性采样逻辑 (CDF)}
-在混合渲染管线的光线追踪阶段，求解渲染方程本质上是求解半球空间上的复杂积分。为了在极低采样率（1 SPP）下获得可接受的初始信号，系统引入了基于累积分布函数（CDF）的重要性采样技术。
-
-\paragraph{1. 蒙特卡罗估计与方差痛点}
-渲染方程的数值解通常通过蒙特卡罗估计器（Monte Carlo Estimator）获得：
-\begin{equation}
-    F_N = \frac{1}{N} \sum_{i=1}^{N} \frac{f(x_i)}{p(x_i)}
-\end{equation}
-其中 $p(x_i)$ 是采样点的概率密度函数（PDF）。若采用均匀采样，当场景中存在极小且极亮的光源时，采样值 $f(x_i)$ 的波动会导致估计器方差巨大，表现为画面上严重的“斑点”噪声（Fireflies）。
-
-\paragraph{2. 重要性采样与 CDF 的推导}
-为了降低方差，理想的采样分布应尽可能接近函数 $f(x)$ 的形状。系统通过构建累积分布函数（Cumulative Distribution Function, CDF）将均匀分布的随机数 $r \in [0, 1)$ 映射到高权重的采样区域。
-
-对于场景中的 $M$ 个离散发光体（发射面或解析光源），其选择概率与光通量成正比。CDF 的构建过程如下：
+\subsection{Compile 阶段：拓扑排序与显存复用算法}
+编译阶段是调度器的算法核心，负责将逻辑 DAG 转化为线性的硬件执行序列：
 \begin{enumerate}
-    \item \textbf{构建 PDF}：计算每个光源的权重 $w_i$（如三角形面积 $\times$ 发射强度），归一化得到 $p_i = w_i / \sum w$。
-    \item \textbf{构建 CDF}：进行前缀和累加，$P_k = \sum_{i=1}^{k} p_i$，其中 $P_M = 1.0$。
-    \item \textbf{逆变换采样}：在 GPU 端生成随机数 $r$，通过二分查找（Binary Search）定位满足 $P_{k-1} \le r < P_k$ 的索引 $k$。
+    \item \textbf{基于 Kahn 算法的拓扑排序}：系统通过分析 Pass 间的依赖权重，执行拓扑排序以确定执行顺序。为提升并行度，具有相同依赖深度的 Pass 会被标记为可并行执行，从而为后续的异步计算（Async Compute）提供调度依据。
+    \item \textbf{显存别名 (Memory Aliasing) 优化}：系统通过生存周期分析（Liveness Analysis），识别不再被后续节点读取的资源。利用 Vulkan 的显存偏移机制，生命周期不重叠的瞬态资源将共享物理显存偏移量，将 VRAM 峰值占用降低约 30\%--50\%。
 \end{enumerate}
 
-\paragraph{3. 硬件加速下的 NEE 策略}
-系统结合直接光源采样（Next Event Estimation, NEE）策略，在光路追踪的每个交点处，利用上述 CDF 显式采样一个光源并测试可见性。这种方法确保了即使在 1 SPP 条件下，降噪器收到的初始信号也具有较高的信噪比，极大地减轻了后续 SVGF 算法的压力。
-
-\subsubsection{实时光线追踪信号探测与采样算法设计}
-系统中的阴影、环境光遮蔽及间接光算法均以“RT”（Ray Tracing）为前缀，旨在强调其完全基于 **Vulkan KHR** 硬件加速接口实现。相比于传统光栅化时代的经验模型（如 Shadow Maps、SSAO 等），基于 RT 的探测算法具有以下显著特征：
-\begin{itemize}
-    \item \textbf{硬件加速的 BVH 遍历}：算法利用 GPU 内置的 RT Core 进行加速，通过对 TLAS（顶层加速结构）的硬件级求交，取代了基于深度贴图的纹理采样，获得了亚像素级的空间位置精度。
-    \item \textbf{视口外感知 (Off-screen Awareness)}：传统算法（如 SSR）仅能利用屏幕空间内的可见信息，导致屏幕边缘效果断裂。RT 算法能够感知相机视锥体之外的几何体，为反射与全局光照提供了完整的物理环境支撑。
-    \item \textbf{从经验模型到随机统计的演进}：RT 算法采用蒙特卡洛（Monte Carlo）随机采样逻辑，将光照计算从单一的“解析经验值”转变为“统计期望值”。虽然这在 1 SPP 采样率下会产生蒙特卡洛噪声，但其天生支持物理正确的半影虚化与颜色反弹。
-\end{itemize}
-
-\paragraph{1. 实时光追软阴影探测 (Ray Traced Shadows)}
-传统的阴影贴图（Shadow Maps）受限于分辨率且难以模拟物理半影。系统通过向面光源进行概率采样实现软阴影效果。
+\subsection{Execute 阶段：屏障推导与异步执行}
+在指令录制阶段，调度器接管了繁琐的同步逻辑：
 \begin{enumerate}
-    \item \textbf{锥形等概率采样模型}：系统将方向光（如太阳光）抽象为具有一定张角 $\theta$ 的远景面光源。在探测阴影时，利用蓝噪声（Blue Noise）抖动生成样本 $\xi$，通过 \texttt{SquareToUniformCone} 映射函数将射线方向 $L_{dir}$ 约束在以光源主方向为中心的锥形范围内。这使得阴影边缘呈现出“接触硬化（Contact Hardening）”特征：即靠近物体的阴影锐利，远离物体的阴影随距离增加而自然虚化。
-    \item \textbf{Any-Hit 硬件遍历优化}：阴影射线仅需确认路径上是否存在“任意”遮挡，而无需计算最近交点。系统在 \texttt{traceRayEXT} 调用中激活 \texttt{gl\_RayFlagsTerminateOnFirstHitEXT} 标志，使硬件 RT Core 在检测到首个碰撞基元后立即返回，极大地压低了在植被等高密度几何体场景下的射线遍历开销。
+    \item \textbf{自动化同步屏障推导}：系统根据相邻 Pass 间资源状态（Layout）与访问掩码（Access Mask）的变化，自动生成并插入 \texttt{vkCmdPipelineBarrier}。这有效避免了由于手动管理导致的写后读（RAW）冲突。
+    \item \textbf{多线程指令录制}：由于 Pass 间已解耦，系统可以分发多个工作线程并发录制 \texttt{VkCommandBuffer}，极大缩短了 CPU 端的提交耗时，确保了高频率的指令流吞吐。
 \end{enumerate}
 
-\paragraph{2. 光线追踪环境光遮蔽 (Ray Traced AO)}
-RTAO 解决了传统 SSAO 无法感知屏幕外几何体遮挡的问题。其核心在于对局部半球空间的可见性积分：
+\section{混合渲染管线详细设计}
+混合渲染管线模块（Hybrid Pipeline Layer）是引擎的视觉输出核心，负责将场景几何信息与物理精确的光线追踪计算进行深度集成。本模块通过在传统的延迟渲染管线中嵌入硬件加速光线追踪阶段，实现了在实时帧率下支持软阴影、环境光遮蔽（AO）及反射效果的混合渲染流程。其整体逻辑架构与数据流转如图 \ref{fig:hybrid_flow} 所示。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/chapter5/hybrid_pipeline_flow.png}
+    \caption{混合渲染管线数据流与逻辑链路设计}
+    \label{fig:hybrid_flow}
+\end{figure}
+
+\subsection{基于延迟光栅化的 G-Buffer 预处理}
+在混合管线的首个阶段，引擎通过延迟光栅化高效捕获场景的几何特征。
 \begin{enumerate}
-    \item \textbf{余弦权重采样 (Cosine-weighted Sampling)}：
-    根据漫反射表面的物理特性，系统在表面法线 $n$ 的半球范围内发射射线。射线的分布密度与 $\cos\theta$ 成正比，其数学期望遵循：
-    \begin{equation}
-        AO(p) = \frac{1}{\pi} \int_{\Omega} V(p, \omega) (n \cdot \omega) d\omega
-    \end{equation}
-    其中 $V(p, \omega)$ 为二值可见性函数。
-    \item \textbf{短程探测设计}：为了保证 AO 的局部特征（局部对比度），系统将射线的最大探测距离 $T_{max}$ 限制在固定半径（如 2.0 单位）内。这使得墙角、缝隙等微小区域能产生深邃且自然的阴影感，显著增强了场景的体积感。
+    \item \textbf{几何信息压缩存储}：利用多渲染目标（MRT）技术，系统将反照率（Albedo）、世界空间法线（Normal）、材质参数（Roughness/Metallic）以及屏幕空间运动矢量（Motion Vectors）同步写入 G-Buffer。这种解耦设计允许后续光追加速结构利用像素级的几何数据，极大地缩短了求交计算的范围。
+    \item \textbf{光追启发式引导}：G-Buffer 提供的深度与法线信息不仅用于着色，还作为光线追踪阶段的“启发式引导”。通过在深度缓冲区内提取射线起始点（Ray Origin），系统能够规避无效的真空区域遍历，将光线投射的起始位置精确锁定在几何表面。
 \end{enumerate}
 
-\paragraph{3. 1-Bounce 漫反射间接光 (Ray Traced GI)}
-间接光探测实现了光线在物体间的真实反弹，其设计包含两个关键步骤：
+\subsection{硬件加速光线追踪与采样算法}
+光线追踪阶段是提升画面物理真实感的关键。针对实时渲染中有限的采样率（1 SPP），本模块采用了多项优化采样算法：
 \begin{enumerate}
-    \item \textbf{1-Bounce 能量传输路径}：间接光射线从第一交点（Primary Hit）出发，在 Closest Hit 阶段再次进行直接光计算。这一过程模拟了光线从“光源 $\rightarrow$ 二次反射点 $\rightarrow$ 主表面 $\rightarrow$ 相机”的能量路径。相比于 0-Bounce 的环境光，它能产生显著的颜色流溢（Color Bleeding）效果。
-    \item \textbf{反照率解耦 (Albedo Demodulation) 机制}：
-    这是系统针对混合渲染设计的核心优化方案。为了后续 SVGF 降噪器的稳定性，系统在输出 GI 信号前剥离了材质的基色：
-    \begin{equation}
-        I_{irradiance} = \frac{L_{radiance}}{\rho_{albedo} + \epsilon}
-    \end{equation}
-    \textbf{物理意义}：间接光辐射度（Radiance）包含了高频的物体纹理，直接降噪会导致纹理模糊。通过解耦出的辐照度（Irradiance）仅代表空间光照场的低频分布，更适合进行时空滤波。最终在合成阶段再通过乘回 Albedo 进行重调制（Re-modulation），从而实现了在消除光追噪声的同时，保留物体表面纹理的绝对锐利。
+    \item \textbf{重要性采样 (Importance Sampling)}：系统基于蒙特卡洛（Monte Carlo）积分思想，结合微表面模型（Microfacet model）的 BRDF 分布进行重要性采样。相比于均匀分布采样，该方法能够将有限的光线更多地分配给对光照贡献较大的方向，从而显著降低渲染结果的方差。
+    \item \textbf{光追阴影与遮蔽}：引擎不再依赖传统的阴影贴图，而是通过发射硬阴影射线（Hard Shadow Rays）直接探测光源可见性。针对面光源产生的半影（Penumbra）区域，系统通过对光照方向进行角直径抖动采样，实现了物理真实的软阴影过渡与接触遮蔽效果。
 \end{enumerate}
 
-\subsection{SVGF 时空方差引导降噪算法实现}
-针对 1 SPP 采样率下极高的蒙特卡洛噪声，系统实现了一套完整的 SVGF（Spatiotemporal Variance-Guided Filtering）降噪管线。其整体架构如图 \ref{fig:svgf_pipeline} 所示，底层历史资源持久化机制如图 \ref{fig:history_mechanism} 所示。
+\subsection{时空域联合降噪（SVGF）算法设计}
+为了解决 1 SPP 带来的极端噪声，本模块集成了时空方差引导过滤（SVGF）算法：
+\begin{enumerate}
+    \item \textbf{时间域累积 (Reprojection)}：利用运动矢量将当前帧像素重投影至前一帧。通过指数移动平均（Exponential Moving Average, EMA）技术，系统将多帧的光照能量进行历史累积，在保持运动一致性的同时大幅提升了信噪比。
+    \item \textbf{空间域边缘保留滤波}：在空域阶段，系统采用基于 G-Buffer 引导的联合双边滤波（Bilateral filter）。通过对深度差异与法线夹角设置阈值，滤波器能够识别并保留几何边缘，避免在物体轮廓处产生过度模糊（Blurring），确保了画面的锐利度。
+\end{enumerate}
+
+\subsection{延迟光照解耦与最终合成}
+在渲染管线的末端，系统将所有的光照分量进行最终的线性合成与色彩转换：
+\begin{enumerate}
+    \item \textbf{解耦照明计算}：环境光遮蔽（Ambient Occlusion）与直接光照被独立计算并调制，允许开发者根据艺术需求动态调整 AO 的遮蔽强度。
+    \item \textbf{HDR 色调映射}：所有计算均在 32 位浮点 HDR 空间执行。最终输出阶段通过 ACES（Academy Color Encoding System）色调映射算法，将高动态范围信号映射至标准 LDR 范围，并进行 Gamma 校正（$\gamma = 2.2$），以适配主流显示器的色彩呈现。
+\end{enumerate}
+
+
+\section{交互调试模块设计}
+可视化模块作为渲染引擎的人机交互窗口，主要负责管线参数的实时调度与性能回显。系统通过 \texttt{ImGuiLayer} 实现了对降噪步长、曝光强度等因子的动态绑定。开发者可以通过实时交互面板（图 \ref{fig:editor_ui}）直接干预 GPU 端的 Uniform Buffer，并利用自动插入的 GPU 时间戳（Timestamp Query）对每个渲染阶段的执行耗时进行纳秒级监控。
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.8\textwidth]{chapter5/history_persistent_mechanism.png}
-    \caption{信号重建时域历史持久化机制图}
-    \label{fig:history_mechanism}
-\end{figure}
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.4\textwidth]{chapter5/svgf_pipeline_data_flow.png}
-    \caption{SVGF 降噪算法数据流转与逻辑拓扑图}
-    \label{fig:svgf_pipeline}
-\end{figure}
-
-\subsubsection{反照率解耦 (Albedo Demodulation)}
-在进入降噪器前，系统执行反照率解耦（Demodulate Albedo），将光照计算结果除以表面基础色（Albedo）。这一策略确保了随后空间滤波仅作用于纯粹的辐照度信号上，防止高频纹理细节被错误模糊；在流水线末端再进行重新调制（Re-modulate），以保证纹理的绝对锐利。
-
-\subsubsection{时域滤波与方差估计 (Temporal Filtering \& Variance)}
-降噪的第一阶段是利用跨帧一致性来提升信噪比。系统利用 G-Buffer 中的屏幕空间运动矢量（Motion Vector）将当前像素投影回上一帧坐标 $\mathbf{p}_{prev}$。
-
-\textbf{有效性校验}：为了防止在遮挡变化区域引入历史“鬼影”（Ghosting），系统执行了严格的校验。如果当前像素与历史像素的深度差异过大、法线夹角过大，或者所属的物体 Mesh ID 不一致，则判定历史失效，丢弃时域数据。
-
-\textbf{基于矩的方差估计 (Variance Estimation)}：
-若校验通过，系统采用指数移动平均（Exponential Moving Average, EMA）在时域上累积亮度的一阶矩（$E[L]$）与二阶矩（$E[L^2]$）：
-\begin{equation}
-    E[L]_t = \alpha L_t + (1 - \alpha) E[L]_{t-1}
-\end{equation}
-\begin{equation}
-    E[L^2]_t = \alpha L_t^2 + (1 - \alpha) E[L^2]_{t-1}
-\end{equation}
-其中混合权重 $\alpha$ 取决于历史有效样本数 $N$：$\alpha = \max(1/N, 0.05)$。利用统计学公式，可以实时估算每个像素的亮度方差 $\sigma^2$：
-\begin{equation}
-    \sigma^2 = \text{Var}(L) = E[L^2] - (E[L])^2
-\end{equation}
-若遇到历史失效，系统会退化为使用一个 $7 \times 7$ 的双边滤波器在空间域对局部方差进行快速预估：
-\begin{equation}
-    \sigma^2_{spatial}(p) = \frac{\sum_{q \in \mathcal{N}_7} w(p, q)^2 \cdot \text{Var}(q)}{\left(\sum_{q \in \mathcal{N}_7} w(p, q)\right)^2}
-\end{equation}
-该方差数据是 SVGF 算法的“灵魂”，用于引导后续的空间滤波。如图 \ref{fig:variance_map} 所示，方差图清晰地揭示了场景中采样不足的高噪点区域。
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.7\textwidth]{chapter5/svgf_variance_map.png}
-    \caption{实时估算的亮度方差图 (Variance Map)}
-    \label{fig:variance_map}
-\end{figure}
-
-\subsubsection{空间滤波：联合双边 A-Trous 小波变换}
-在获取了初步平滑的信号和方差后，系统在 Compute Shader 中执行空间滤波。常规的均匀模糊（如高斯滤波）虽然能去除高频噪声，但会丢失高频几何与光影细节。
-
-\textbf{A-Trous 跨步滤波}：为了在保持常数级计算开销的同时获取巨大的感受野，滤波器采用 A-Trous（带孔小波）结构，执行 5 轮迭代。对于第 $i$ 层滤波，其离散卷积定义为：
-\begin{equation}
-    \bar{C}_{i+1}(p) = \sum_{q \in \mathcal{N}_5} h(q) \cdot C_i(p + q \cdot 2^i)
-\end{equation}
-其中 $h(q)$ 为 $5 \times 5$ 的 B-spline 滤波核，采样步长随迭代次数 $i$ 呈 $2^i$ 指数增长。
-
-\textbf{联合双边滤波 (Joint Bilateral Filtering)}：
-为了解决过度模糊问题，SVGF 引入了联合双边滤波。在交叉采样时，最终的像素权重 $w(p, q)$ 由三部分边缘停止函数组成：
-\begin{equation}
-    w(p, q) = \exp \left( -\frac{|z(p)-z(q)|}{\sigma_z \cdot |\nabla z(p) \cdot (p-q)| + \epsilon} - \frac{\|\mathbf{n}_p-\mathbf{n}_q\|}{\sigma_n} - \frac{|L(p)-L(q)|}{\sigma_l \sqrt{\text{FilteredVar}(p)} + \epsilon} \right)
-\end{equation}
-\begin{itemize}
-    \item \textbf{深度权重}：利用视图空间的线性深度梯度进行归一化，防止跨越几何边界。
-    \item \textbf{法线权重}：计算法线之间的欧氏距离，防止平滑转角。
-    \item \textbf{亮度权重}：两像素亮度的差异差需要结合当前方差进行归一化评估。在方差极大区域允许更大范围混合，在方差极小区域严格阻止混合以保留光影梯度。
-\end{itemize}
-
-此外，在对颜色进行滤波的同时，系统也采用权重平方对像素方差进行同步滤波，确保了降噪过程在统计意义上的自洽性。系统实现了在极低采样率下对间接光照的高质量重建，如图 \ref{fig:gi_denoise_compare} 所示。
-
-\begin{figure}[H]
-    \centering
-    \begin{subfigure}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{chapter5/rt_gi_raw.png}
-        \caption{原始 1 SPP 间接光照 (高方差噪声)}
-    \end{subfigure}
-    \hfill
-    \begin{subfigure}{0.48\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{chapter5/rt_gi_svgf.png}
-        \caption{SVGF 滤波后结果 (平滑且保留细节)}
-    \end{subfigure}
-    \caption{间接光照信号在 SVGF 降噪前后的对比分析}
-    \label{fig:gi_denoise_compare}
-\end{figure}
-
-\subsection{时域抗锯齿 (TAA) 方案实现}
-在消除了光追噪声后，系统引入 TAA 方案利用时域冗余信息执行几何边缘的二次重建。开启 TAA 前后的视觉对比效果如图 \ref{fig:taa_comparison} 所示。
-
-\begin{figure}[H]
-    \centering
-    \begin{subfigure}{0.45\textwidth}
-        \includegraphics[width=\textwidth]{chapter5/taa_comparison_off.png}
-        \caption{TAA OFF}
-    \end{subfigure}
-    \hfill
-    \begin{subfigure}{0.45\textwidth}
-        \includegraphics[width=\textwidth]{chapter5/taa_comparison_on.png}
-        \caption{TAA ON}
-    \end{subfigure}
-    \caption{时域抗锯齿 (TAA) 开启前后视觉效果对比图}
-    \label{fig:taa_comparison}
-\end{figure}
-
-\subsubsection{TAA 基本原理}
-时域抗锯齿是一种通过重复利用先前渲染帧的信息来去除当前帧锯齿的空间抗锯齿技术。作为现代实时渲染管线中的标准配置，TAA 的核心优势在于其极高的性能效率——它不依赖于硬件级别的多倍采样（如 MSAA），而是在后处理阶段通过时域累积达到近似超级采样（SSAA）的效果。
-
-\subsubsection{亚像素抖动与采样对齐 (Sub-pixel Jitter)}
-为了在时域上获取亚像素级别的几何覆盖信息，系统在投影矩阵中引入了基于 Halton 低差异序列的亚像素偏移。在 Compute Shader 中，系统执行了严格的采样对齐补偿：
-\begin{equation}
-    \mathbf{uv}_{prev} = (\mathbf{uv}_{curr} - \mathbf{J}_{curr}) - \mathbf{v} + \mathbf{J}_{prev}
-\end{equation}
-其中 $\mathbf{J}$ 代表归一化到 UV 空间的采样抖动值。这种“双向抖动补偿”确保了即使在相机静止时，每帧采样到的空间位置也存在微小差异，从而通过时域累积实现等效的超级采样效果。
-
-\subsubsection{速度扩张与最近深度搜索 (Velocity Dilation)}
-由于几何边缘包含背景与前景的剧烈过渡，直接采样中心像素的运动矢量可能导致错误的背景回溯，产生边缘拖影。系统实现了一种基于深度的速度扩张策略：在 $3 \times 3$ 邻域内寻找最靠近相机的像素点（Reversed-Z 规范下的深度极大值点），并利用该点的运动矢量 $\mathbf{v}$ 进行重投影。这一机制确保了前景遮挡物边缘能够获得正确的运动引导。
-
-\subsubsection{基于 YCoCg 色彩空间的历史裁剪 (Ray-Box Clipping)}
-为了抑制由于遮挡变化或动态光照产生的“鬼影”与亮度闪烁，系统在 \textbf{YCoCg} 色彩空间内执行了历史裁剪。通过将 RGB 信号变换到亮度（Y）与色度（Co, Cg）解耦的空间，并在裁剪前应用 HDR 压缩映射（ToneMap）来抑制光追场景特有的高亮噪点（Fireflies）。
-
-裁剪过程利用当前像素 $3 \times 3$ 邻域的均值 $\mu$ 与方差 $\sigma$ 构建动态 AABB 包围盒。系统采用射线相交算法计算历史颜色指向邻域均值的射线与该包围盒的交点 $t$：
-\begin{equation}
-    \mathbf{C}_{history}' = \text{lerp}(\mathbf{C}_{history}, \mu, t)
-\end{equation}
-这种基于 YCoCg 空间的方差裁剪在平滑几何边缘与保留动态光影细节之间取得了极佳的平衡。
-
-\subsubsection{自适应混合与结果合成}
-最后一步是将处理后的历史颜色与当前帧颜色进行混合。系统采用基于运动矢量的指数移动平均模型：
-\begin{equation}
-    \mathbf{C}_{final} = \beta \mathbf{C}_{current} + (1 - \beta) \mathbf{C}_{history\_clipped}
-\end{equation}
-混合因子 $\beta$ 定义为：$\beta = \text{clamp}(0.1 + \text{length}(\mathbf{v}) \cdot 0.1, 0.1, 0.9)$。当物体运动速度较快时，系统会增大 $\beta$ 以减少重投影误差。
-
-\subsection{后期影像流水线与电影级合成}
-在信号重建任务完成后，系统通过后处理通道（PostProcessPass）执行最后的显示映射与视觉强化。
-
-\subsubsection{曝光补偿与 HDR 线性空间处理}
-后期影像流水线的首要任务是处理光线追踪产生的极高动态范围（HDR）辐射度数据。系统首先应用基于用户交互定义的曝光系数（Exposure），对全场景的线性光强进行缩放：
-\begin{equation}
-    \mathbf{C}_{exposed} = \mathbf{C}_{linear} \cdot \text{Exposure}
-\end{equation}
-这种线性缩放确保了暗部细节在后续处理中能够被正确保留，同时为高亮区域提供了平滑的调控手段，防止了由于数值截断产生的画面细节丢失。
-
-\subsubsection{标准显示映射与伽马校正 (Gamma Correction)}
-由于底层计算均在物理线性的色彩空间执行，而主流显示设备遵循非线性的亮度响应曲线，系统在管线末端执行了精确的伽马校正映射：
-\begin{equation}
-    \mathbf{C}_{out} = \max(\mathbf{C}_{exposed}, 0)^{1/2.2}
-\end{equation}
-通过将线性分量转换为 Gamma 2.2 空间，系统确保了渲染产出的亮度分布符合标准显示器的物理特性以及人类视觉系统的感知规律。这一色彩重建过程不仅提升了画面的对比度与层次感，更为最终的电影级视觉呈现提供了可靠的色彩准确度保障。
-
-\section{交互调试模块}
-可视化模块是渲染引擎的人机交互窗口，其实时交互控制面板如图 \ref{fig:editor_ui} 所示。
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.95\textwidth]{chapter5/editor_interface_full.png}
-    \caption{实时交互控制与调试面板}
+    \includegraphics[width=0.85\textwidth]{chapter5/editor_interface_full.png}
+    \caption{实时交互控制与调试面板回显}
     \label{fig:editor_ui}
 \end{figure}
 
-该界面主要包含以下功能子项：
-\begin{itemize}
-    \item \textbf{中间附件预览}：支持实时切换预览 G-Buffer 的各层分量以及降噪过程中的方差图。
-    \item \textbf{纳秒级耗时统计}：利用 RenderGraph 自动插入的 GPU 时间戳，在面板上实时反馈每个渲染 Pass 的精确耗时，为管线性能调优提供了直观的数据支撑。
-\end{itemize}
-
-\subsection{渲染控制与参数动态绑定}
-为了提升开发效率，系统实现了一套基于事件驱动的参数调节机制，其数据反馈环路如图 \ref{fig:param_sequence} 所示。
-
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.8\textwidth]{chapter5/param_adjustment_sequence.png}
-    \caption{渲染参数动态调节与 UBO 更新顺序图}
-    \label{fig:param_sequence}
-\end{figure}
-
-通过 ImGui 控件实时修改渲染管线中的关键因子（如 SVGF 的时间步长、TAA 的反馈系数等），系统能够即时响应并将新参数通过 Uniform Buffer 更新至 GPU，实现了“所见即所得”的调优体验。
-
 \section{本章小结}
-本章完成了系统六大核心模块的底层逻辑设计。通过对调度算法、资源模型及信号重建链路（SVGF/TAA）的深度拆解，形成了严密的详细设计方案，为下一章的系统实现奠定了坚实的工程基础。
+本章完成了系统六大核心模块的详细设计。通过对调度算法、资源模型及信号重建链路（SVGF/TAA）的深度拆解，形成了严密的工程方案，为下一章的系统实现奠定了坚实的理论基础。
